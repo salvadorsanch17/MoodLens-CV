@@ -2,7 +2,7 @@ from collections import defaultdict
 from datetime import datetime
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor, QPainter, QFont, QPen
+from PyQt5.QtGui import QColor, QPainter, QFont
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QScrollArea, QGridLayout, QSizePolicy,
@@ -106,6 +106,9 @@ class DashboardWidget(QWidget):
         self._stress_sum = 0.0
         self._stress_n = 0
 
+        # emotion log: list of {emotion, stress, app, session_min, hour}
+        self._emotion_log = []
+
         # ── build ────────────────────────────────────────────────────────
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -130,6 +133,7 @@ class DashboardWidget(QWidget):
         self._build_status_row()
         self._build_metrics_row()
         self._build_charts_row()
+        self._build_correlations()
         self._build_insight()
         self._lay.addStretch()
 
@@ -323,6 +327,34 @@ class DashboardWidget(QWidget):
         self._daily_focus = [0.0] * 7
         self._refresh_weekly()
 
+    # ── correlations card ─────────────────────────────────────────────────
+
+    def _build_correlations(self):
+        card = self._card()
+        card.setMinimumHeight(160)
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(24, 24, 24, 20)
+        lay.setSpacing(8)
+        lay.addWidget(self._lbl(
+            "App Correlations", _C["onSurf"], 16, True, "Manrope"))
+        lay.addWidget(self._lbl(
+            "Emotion patterns by application", _C["onSurfV"], 11))
+        lay.addSpacing(8)
+
+        # Container for dynamic correlation rows
+        self._corr_container = QVBoxLayout()
+        self._corr_container.setSpacing(6)
+
+        placeholder = self._lbl(
+            "Gathering data — correlations appear after a few minutes of use.",
+            _C["onSurfV"], 12)
+        placeholder.setWordWrap(True)
+        self._corr_container.addWidget(placeholder)
+
+        lay.addLayout(self._corr_container)
+        lay.addStretch()
+        self._lay.addWidget(card)
+
     # ── insight ───────────────────────────────────────────────────────────
 
     def _build_insight(self):
@@ -400,6 +432,16 @@ class DashboardWidget(QWidget):
         self._distractions_val.setText(str(self._distraction_count))
         self._refresh_insight()
 
+    def add_log_entry(self, emotion, stress, app, session_min):
+        self._emotion_log.append({
+            "emotion": emotion,
+            "stress": stress,
+            "app": app,
+            "session_min": session_min,
+            "hour": datetime.now().hour,
+        })
+        self._refresh_correlations()
+
     # ── internal refreshes ────────────────────────────────────────────────
 
     def _refresh_heatmap(self):
@@ -437,7 +479,165 @@ class DashboardWidget(QWidget):
             colors.append(c)
         self._weekly.set_data(values, colors)
 
+    _NEG_EMOTIONS = {"angry", "sad", "fear", "disgust"}
+
+    def _refresh_correlations(self):
+        # Need a minimum amount of data before showing correlations
+        if len(self._emotion_log) < 12:
+            return
+
+        # Group entries by app
+        app_data = defaultdict(list)
+        for entry in self._emotion_log:
+            app_data[entry["app"]].append(entry)
+
+        # Build correlation insights: per-app avg stress, dominant emotion,
+        # and time-in-session patterns
+        insights = []
+        for app, entries in app_data.items():
+            if len(entries) < 3 or app == "Unknown":
+                continue
+            avg_stress = sum(e["stress"] for e in entries) / len(entries)
+            neg_count = sum(1 for e in entries
+                           if e["emotion"] in self._NEG_EMOTIONS)
+            neg_pct = neg_count / len(entries) * 100
+
+            # Check if stress rises with session duration while in this app
+            late_entries = [e for e in entries if e["session_min"] >= 60]
+            early_entries = [e for e in entries if e["session_min"] < 30]
+            fatigue_note = ""
+            if len(late_entries) >= 3 and len(early_entries) >= 3:
+                late_stress = sum(e["stress"] for e in late_entries) / len(late_entries)
+                early_stress = sum(e["stress"] for e in early_entries) / len(early_entries)
+                if late_stress - early_stress > 10:
+                    mins = int(min(e["session_min"] for e in late_entries
+                                   if e["stress"] > avg_stress * 1.1))
+                    fatigue_note = f"  Stress rises after ~{mins} min in session."
+
+            # Determine the most common negative emotion for this app
+            neg_emotions = [e["emotion"] for e in entries
+                            if e["emotion"] in self._NEG_EMOTIONS]
+            top_neg = ""
+            if neg_emotions:
+                from collections import Counter
+                top_neg = Counter(neg_emotions).most_common(1)[0][0]
+
+            insights.append({
+                "app": app,
+                "samples": len(entries),
+                "avg_stress": avg_stress,
+                "neg_pct": neg_pct,
+                "top_neg": top_neg,
+                "fatigue": fatigue_note,
+            })
+
+        # Sort by avg stress descending (most stressful apps first)
+        insights.sort(key=lambda x: -x["avg_stress"])
+
+        # Clear old rows
+        while self._corr_container.count():
+            item = self._corr_container.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        if not insights:
+            lbl = self._lbl(
+                "Not enough per-app data yet. Keep using MoodLens!",
+                _C["onSurfV"], 12)
+            lbl.setWordWrap(True)
+            self._corr_container.addWidget(lbl)
+            return
+
+        for info in insights[:5]:  # top 5 apps
+            row_w = QWidget()
+            row_w.setAttribute(Qt.WA_StyledBackground, True)
+            row_w.setStyleSheet(
+                f"background: {_C['surface2']}; border-radius: 8px;")
+            row_lay = QHBoxLayout(row_w)
+            row_lay.setContentsMargins(14, 10, 14, 10)
+            row_lay.setSpacing(12)
+
+            # App name
+            name = self._lbl(info["app"], _C["onSurf"], 13, True)
+            name.setFixedWidth(140)
+            row_lay.addWidget(name)
+
+            # Stress bar
+            stress_pct = min(info["avg_stress"] / 100, 1.0)
+            bar_bg = QWidget()
+            bar_bg.setFixedHeight(8)
+            bar_bg.setMinimumWidth(80)
+            bar_bg.setAttribute(Qt.WA_StyledBackground, True)
+            bar_bg.setStyleSheet(
+                f"background: {_C['surfaceH']}; border-radius: 4px;")
+
+            bar_fill = QWidget(bar_bg)
+            bar_fill.setFixedHeight(8)
+            fill_w = max(4, int(stress_pct * 80))
+            bar_fill.setFixedWidth(fill_w)
+            if info["avg_stress"] < 33:
+                fill_color = _C["primary"]
+            elif info["avg_stress"] < 60:
+                fill_color = _C["secondary"]
+            else:
+                fill_color = _C["tertiary"]
+            bar_fill.setStyleSheet(
+                f"background: {fill_color}; border-radius: 4px;")
+            row_lay.addWidget(bar_bg)
+
+            # Stress %
+            pct_lbl = self._lbl(
+                f"{info['avg_stress']:.0f}%", _C["onSurfV"], 11, True)
+            pct_lbl.setFixedWidth(36)
+            row_lay.addWidget(pct_lbl)
+
+            # Description
+            desc_parts = []
+            if info["neg_pct"] > 30 and info["top_neg"]:
+                desc_parts.append(
+                    f"{info['neg_pct']:.0f}% {info['top_neg']}")
+            if info["fatigue"]:
+                desc_parts.append(info["fatigue"].strip())
+            desc_text = "  ·  ".join(desc_parts) if desc_parts else "baseline"
+            desc = self._lbl(desc_text, _C["onSurfV"], 11)
+            desc.setWordWrap(True)
+            row_lay.addWidget(desc, 1)
+
+            self._corr_container.addWidget(row_w)
+
+    def _get_top_correlation_insight(self):
+        """Return (title, desc) if there's a noteworthy app correlation, else None."""
+        if len(self._emotion_log) < 18:
+            return None
+        app_data = defaultdict(list)
+        for entry in self._emotion_log:
+            if entry["app"] != "Unknown":
+                app_data[entry["app"]].append(entry)
+        for app, entries in sorted(
+                app_data.items(),
+                key=lambda kv: -sum(e["stress"] for e in kv[1]) / len(kv[1])):
+            if len(entries) < 5:
+                continue
+            avg = sum(e["stress"] for e in entries) / len(entries)
+            neg = [e["emotion"] for e in entries
+                   if e["emotion"] in self._NEG_EMOTIONS]
+            if avg > 45 and neg:
+                from collections import Counter
+                top = Counter(neg).most_common(1)[0][0]
+                return (
+                    f"Pattern: {app}",
+                    f"You're consistently {top} while using {app} "
+                    f"(avg stress {avg:.0f}%). Consider taking breaks or "
+                    f"adjusting your workflow in that app.")
+        return None
+
     def _refresh_insight(self):
+        corr = self._get_top_correlation_insight()
+        if corr:
+            self._insight_title.setText(corr[0])
+            self._insight_desc.setText(corr[1])
+            return
         if self._distraction_count >= 10:
             self._insight_title.setText("High Distraction Pattern")
             self._insight_desc.setText(

@@ -3,6 +3,7 @@ import math
 import time
 import random
 import pathlib
+import subprocess
 import cv2
 import numpy as np
 import mediapipe as mp
@@ -34,7 +35,23 @@ GLOW_DEPTH_PX          = 90
 PULSE_INTERVAL_MS      = 40
 BREATH_PHASE_INC       = 2 * math.pi / (8000 / PULSE_INTERVAL_MS)
 GAZE_YAW_THRESHOLD     = 0.15
+LOG_INTERVAL_SECS      = 10        # how often to record an emotion-log entry
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _get_active_app() -> str:
+    """Return the name of the frontmost application (macOS only)."""
+    try:
+        out = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to get name of first '
+             'application process whose frontmost is true'],
+            capture_output=True, text=True, timeout=2,
+        )
+        name = out.stdout.strip()
+        return name if name else "Unknown"
+    except Exception:
+        return "Unknown"
 
 # ── AU stress model ──────────────────────────────────────────────────────────
 AU_STRESS_WEIGHTS = {
@@ -643,6 +660,16 @@ class MainWindow(QMainWindow):
         self._gaze_last_time  = None
         self._total_focus     = 0.0   # tracked for dashboard
 
+        self._last_emotion    = "neutral"
+        self._last_stress     = 0.0
+        self._session_start   = time.monotonic()
+
+        # ── Emotion logger (polls active app + records entry) ────────
+        self._log_timer = QTimer(self)
+        self._log_timer.setInterval(LOG_INTERVAL_SECS * 1000)
+        self._log_timer.timeout.connect(self._record_log_entry)
+        self._log_timer.start()
+
         # ── Thread ───────────────────────────────────────────────────────
         self._thread = EmotionThread()
         self._thread.frame_ready.connect(self._camera.update_frame)
@@ -663,6 +690,7 @@ class MainWindow(QMainWindow):
         self._debug_label.setText(msg)
 
     def _on_emotion(self, dominant, scores):
+        self._last_emotion = dominant
         top = sorted(scores.items(), key=lambda x: -x[1])
         status = "  |  ".join(f"{e}: {s:.1f}%" for e, s in top[:4])
         self._debug_label.setText(f"Mood: {dominant.upper()}  --  {status}")
@@ -689,6 +717,7 @@ class MainWindow(QMainWindow):
             f"color: {colour}; font-size: 13px; font-weight: bold;"
             f"padding: 4px 10px; background-color: {_C['surface']};")
 
+        self._last_stress = score
         self._dashboard.update_stress(score)
 
         if score >= STRESS_THRESHOLD:
@@ -737,6 +766,12 @@ class MainWindow(QMainWindow):
 
         self._gaze_last_time = now
         self._was_looking = looking
+
+    def _record_log_entry(self):
+        app = _get_active_app()
+        session_min = (time.monotonic() - self._session_start) / 60.0
+        self._dashboard.add_log_entry(
+            self._last_emotion, self._last_stress, app, session_min)
 
     def _on_glow_hidden(self):
         self._glow_source = None
