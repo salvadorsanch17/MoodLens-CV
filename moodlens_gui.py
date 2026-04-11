@@ -14,28 +14,29 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QLinearGradient, QBrush
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QWidget,
-    QVBoxLayout, QPushButton, QHBoxLayout, QProgressBar
+    QVBoxLayout, QPushButton, QHBoxLayout, QProgressBar,
+    QTabWidget,
 )
+
+from dashboard import DashboardWidget, _C
 
 # ── tunables ─────────────────────────────────────────────────────────────────
 ANALYZE_EVERY_N_FRAMES = 8
 AU_ANALYZE_EVERY_N_FRAMES = 3
 AU_SMOOTH_ALPHA        = 0.6
-STRESS_THRESHOLD       = 40.0
+STRESS_THRESHOLD       = 50.0
 STRESS_HOLD_SECS       = 10
-GAZE_AWAY_SECS         = 5          # seconds looking away → boredom
-BOREDOM_GLOW_MS        = 5000       # red glow duration
-LOCKIN_GOAL_SECS       = 10 * 60    # 10 minutes of on-screen gaze
+GAZE_AWAY_SECS         = 5
+BOREDOM_GLOW_MS        = 5000
+LOCKIN_GOAL_SECS       = 10 * 60
 GLOW_DURATION_MS       = 2 * 60 * 1000
 GLOW_DEPTH_PX          = 90
 PULSE_INTERVAL_MS      = 40
 BREATH_PHASE_INC       = 2 * math.pi / (8000 / PULSE_INTERVAL_MS)
-GAZE_YAW_THRESHOLD     = 0.15       # head-turn tolerance (0 = dead-centre)
+GAZE_YAW_THRESHOLD     = 0.15
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# AU stress model
-# ---------------------------------------------------------------------------
+# ── AU stress model ──────────────────────────────────────────────────────────
 AU_STRESS_WEIGHTS = {
     "AU04": 0.35, "AU07": 0.20, "AU20": 0.15,
     "AU23": 0.15, "AU24": 0.10, "AU12": -0.25,
@@ -43,7 +44,6 @@ AU_STRESS_WEIGHTS = {
 _POS_SUM = sum(w for w in AU_STRESS_WEIGHTS.values() if w > 0)
 _NEG_SUM = abs(sum(w for w in AU_STRESS_WEIGHTS.values() if w < 0))
 
-# MediaPipe landmark indices
 _LM = {
     "left_eye_inner": 133, "left_lid_upper": 159, "left_lid_lower": 145,
     "right_eye_inner": 362, "right_lid_upper": 386, "right_lid_lower": 374,
@@ -105,7 +105,6 @@ def compute_stress_score(au_row):
 
 
 def is_looking_at_screen(landmarks) -> bool:
-    """Estimate whether user faces the camera from head yaw."""
     nose = landmarks[1]
     left_eye = landmarks[33]
     right_eye = landmarks[263]
@@ -114,7 +113,7 @@ def is_looking_at_screen(landmarks) -> bool:
     total = left_dist + right_dist
     if total < 0.01:
         return False
-    yaw_ratio = left_dist / total          # ≈ 0.5 when facing camera
+    yaw_ratio = left_dist / total
     return abs(yaw_ratio - 0.5) <= GAZE_YAW_THRESHOLD
 
 
@@ -126,7 +125,7 @@ class EmotionThread(QThread):
     frame_ready   = pyqtSignal(np.ndarray)
     emotion_found = pyqtSignal(str, dict)
     stress_found  = pyqtSignal(float, dict)
-    gaze_status   = pyqtSignal(bool)          # True = looking at screen
+    gaze_status   = pyqtSignal(bool)
     log_message   = pyqtSignal(str)
 
     def __init__(self, parent=None):
@@ -153,7 +152,6 @@ class EmotionThread(QThread):
             timestamp_ms += 33
             self.frame_ready.emit(frame.copy())
 
-            # DeepFace emotion analysis
             if frame_count % ANALYZE_EVERY_N_FRAMES == 0:
                 try:
                     results = DeepFace.analyze(
@@ -168,7 +166,6 @@ class EmotionThread(QThread):
                 except Exception as e:
                     self.log_message.emit(f"Analysis error: {e}")
 
-            # MediaPipe: AUs + gaze
             if frame_count % AU_ANALYZE_EVERY_N_FRAMES == 0:
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
@@ -176,9 +173,7 @@ class EmotionThread(QThread):
 
                 if mp_result.face_landmarks:
                     lms = mp_result.face_landmarks[0]
-                    # Gaze
                     self.gaze_status.emit(is_looking_at_screen(lms))
-                    # AUs
                     h, w = frame.shape[:2]
                     raw = compute_aus_from_landmarks(lms, w, h)
                     if raw:
@@ -192,7 +187,6 @@ class EmotionThread(QThread):
                         score = compute_stress_score(smooth_aus)
                         self.stress_found.emit(score, dict(smooth_aus))
                 else:
-                    # No face → not looking at screen
                     self.gaze_status.emit(False)
 
         landmarker.close()
@@ -208,7 +202,6 @@ class EmotionThread(QThread):
 # ═══════════════════════════════════════════════════════════════════════════
 
 class GlowOverlay(QWidget):
-    """Full-screen glow border overlay."""
     glow_hidden = pyqtSignal()
 
     def __init__(self):
@@ -216,26 +209,22 @@ class GlowOverlay(QWidget):
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
             | Qt.Window | Qt.WindowDoesNotAcceptFocus
-        )
+            | Qt.WindowTransparentForInput)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setGeometry(QApplication.primaryScreen().geometry())
-
-        self._alpha  = 0.0
-        self._phase  = 0.0
+        self._alpha = 0.0
+        self._phase = 0.0
         self._active = False
-        self._color  = QColor(30, 144, 255)
-
+        self._color = QColor(30, 144, 255)
         self._pulse_timer = QTimer(self)
         self._pulse_timer.setInterval(PULSE_INTERVAL_MS)
         self._pulse_timer.timeout.connect(self._tick)
-
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.hide_glow)
 
-    def show_glow(self, color: QColor = None, duration_ms: int = None):
+    def show_glow(self, color=None, duration_ms=None):
         if color is not None:
             self._color = color
         dur = duration_ms if duration_ms is not None else GLOW_DURATION_MS
@@ -244,7 +233,7 @@ class GlowOverlay(QWidget):
             self._hide_timer.start()
             return
         self._active = True
-        self._phase  = 0.0
+        self._phase = 0.0
         self.show()
         self.raise_()
         self._pulse_timer.start()
@@ -271,53 +260,47 @@ class GlowOverlay(QWidget):
     def paintEvent(self, _):
         if not self._active:
             return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(Qt.NoPen)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
         r = self.rect()
         d = GLOW_DEPTH_PX
         a = int(self._alpha * 255)
-        glow  = QColor(self._color.red(), self._color.green(), self._color.blue(), a)
+        glow = QColor(self._color.red(), self._color.green(), self._color.blue(), a)
         clear = QColor(self._color.red(), self._color.green(), self._color.blue(), 0)
 
-        def grad(x1, y1, x2, y2):
-            g = QLinearGradient(x1, y1, x2, y2)
-            g.setColorAt(0.0, glow)
-            g.setColorAt(1.0, clear)
-            return QBrush(g)
+        def g(x1, y1, x2, y2):
+            gr = QLinearGradient(x1, y1, x2, y2)
+            gr.setColorAt(0.0, glow)
+            gr.setColorAt(1.0, clear)
+            return QBrush(gr)
 
-        painter.setBrush(grad(0, r.top(), 0, r.top() + d))
-        painter.drawRect(r.left(), r.top(), r.width(), d)
-        painter.setBrush(grad(0, r.bottom(), 0, r.bottom() - d))
-        painter.drawRect(r.left(), r.bottom() - d, r.width(), d)
-        painter.setBrush(grad(r.left(), 0, r.left() + d, 0))
-        painter.drawRect(r.left(), r.top(), d, r.height())
-        painter.setBrush(grad(r.right(), 0, r.right() - d, 0))
-        painter.drawRect(r.right() - d, r.top(), d, r.height())
-        painter.end()
+        p.setBrush(g(0, r.top(), 0, r.top() + d))
+        p.drawRect(r.left(), r.top(), r.width(), d)
+        p.setBrush(g(0, r.bottom(), 0, r.bottom() - d))
+        p.drawRect(r.left(), r.bottom() - d, r.width(), d)
+        p.setBrush(g(r.left(), 0, r.left() + d, 0))
+        p.drawRect(r.left(), r.top(), d, r.height())
+        p.setBrush(g(r.right(), 0, r.right() - d, 0))
+        p.drawRect(r.right() - d, r.top(), d, r.height())
+        p.end()
 
 
 class ConfettiOverlay(QWidget):
-    """Full-screen confetti burst."""
-
     def __init__(self):
         super().__init__(None)
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
             | Qt.Window | Qt.WindowDoesNotAcceptFocus
-        )
+            | Qt.WindowTransparentForInput)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setGeometry(QApplication.primaryScreen().geometry())
-
         self._particles = []
         self._active = False
-
         self._timer = QTimer(self)
         self._timer.setInterval(30)
         self._timer.timeout.connect(self._tick)
-
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.hide_confetti)
@@ -329,19 +312,13 @@ class ConfettiOverlay(QWidget):
             (30, 144, 255), (153, 102, 255), (255, 71, 179),
             (255, 215, 0), (0, 206, 209),
         ]
-        self._particles = []
-        for _ in range(250):
-            self._particles.append({
-                "x": random.uniform(0, w),
-                "y": random.uniform(-h * 0.6, 0),
-                "dx": random.uniform(-3, 3),
-                "dy": random.uniform(1, 6),
-                "color": random.choice(colors),
-                "w": random.randint(6, 12),
-                "h": random.randint(3, 8),
-                "rot": random.uniform(0, 360),
-                "drot": random.uniform(-6, 6),
-            })
+        self._particles = [{
+            "x": random.uniform(0, w), "y": random.uniform(-h * 0.6, 0),
+            "dx": random.uniform(-3, 3), "dy": random.uniform(1, 6),
+            "color": random.choice(colors),
+            "w": random.randint(6, 12), "h": random.randint(3, 8),
+            "rot": random.uniform(0, 360), "drot": random.uniform(-6, 6),
+        } for _ in range(250)]
         self._active = True
         self.show()
         self.raise_()
@@ -355,54 +332,65 @@ class ConfettiOverlay(QWidget):
         self.hide()
 
     def _tick(self):
-        for p in self._particles:
-            p["x"] += p["dx"]
-            p["y"] += p["dy"]
-            p["dy"] += 0.12                     # gravity
-            p["dx"] += random.uniform(-0.08, 0.08)  # wobble
-            p["rot"] += p["drot"]
+        for pt in self._particles:
+            pt["x"] += pt["dx"]
+            pt["y"] += pt["dy"]
+            pt["dy"] += 0.12
+            pt["dx"] += random.uniform(-0.08, 0.08)
+            pt["rot"] += pt["drot"]
         self.update()
 
     def paintEvent(self, _):
         if not self._active:
             return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(Qt.NoPen)
-        for p in self._particles:
-            c = p["color"]
-            painter.setBrush(QColor(c[0], c[1], c[2], 210))
-            painter.save()
-            painter.translate(p["x"], p["y"])
-            painter.rotate(p["rot"])
-            painter.drawRect(-p["w"] // 2, -p["h"] // 2, p["w"], p["h"])
-            painter.restore()
-        painter.end()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        for pt in self._particles:
+            c = pt["color"]
+            p.setBrush(QColor(c[0], c[1], c[2], 210))
+            p.save()
+            p.translate(pt["x"], pt["y"])
+            p.rotate(pt["rot"])
+            p.drawRect(-pt["w"] // 2, -pt["h"] // 2, pt["w"], pt["h"])
+            p.restore()
+        p.end()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Lock-In focus timer widget (top-right corner)
+#  Lock-In widget
 # ═══════════════════════════════════════════════════════════════════════════
 
 class LockInWidget(QWidget):
     completed = pyqtSignal()
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    _TITLE_NORMAL = (
+        "color: #1e90ff; font-size: 13px; font-weight: bold; background: transparent;")
+    _TITLE_ALERT = (
+        "color: #ffffff; font-size: 13px; font-weight: bold; background: transparent;")
+    _TITLE_DONE = (
+        "color: #4caf50; font-size: 13px; font-weight: bold; background: transparent;")
+
+    FADE_DURATION_MS = 5000
+    _FADE_TICK_MS    = 40
+
+    def __init__(self):
+        super().__init__(None)
+        self.setWindowFlags(
+            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+            | Qt.Window | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setFixedSize(210, 86)
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet(
-            "LockInWidget { background: rgba(15,15,15,210);"
-            "border-radius: 10px; }")
+        screen = QApplication.primaryScreen().geometry()
+        self.move(screen.right() - self.width() - 18, screen.top() + 18)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 8, 12, 8)
         lay.setSpacing(4)
 
         self._title = QLabel("Lock In! Focus for 10 min")
-        self._title.setStyleSheet(
-            "color: #1e90ff; font-size: 13px; font-weight: bold;"
-            "background: transparent;")
+        self._title.setStyleSheet(self._TITLE_NORMAL)
         self._title.setAlignment(Qt.AlignCenter)
         lay.addWidget(self._title)
 
@@ -426,8 +414,50 @@ class LockInWidget(QWidget):
 
         self._focus_secs = 0.0
         self._completed = False
+        self._alert = False
+        self._fading = False
+        self._bg_r, self._bg_g, self._bg_b = 15, 15, 15
+        self._bg_alpha = 80
+        self._target_alpha = 80
 
-    def add_focus_time(self, secs: float):
+        self._fade_timer = QTimer(self)
+        self._fade_timer.setInterval(self._FADE_TICK_MS)
+        self._fade_timer.timeout.connect(self._fade_tick)
+        self._fade_delay = QTimer(self)
+        self._fade_delay.setSingleShot(True)
+        self._fade_delay.timeout.connect(self._start_fade_out)
+
+    def paintEvent(self, _):
+        if self._bg_alpha <= 0 and not self._alert and not self._completed:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(self._bg_r, self._bg_g, self._bg_b, int(self._bg_alpha)))
+        p.drawRoundedRect(self.rect(), 10, 10)
+        p.end()
+
+    _IDLE_ALPHA = 80
+
+    def _fade_tick(self):
+        step = 255 * self._FADE_TICK_MS / self.FADE_DURATION_MS
+        if self._bg_alpha < self._target_alpha:
+            self._bg_alpha = min(self._bg_alpha + step * 4, self._target_alpha)
+        elif self._bg_alpha > self._target_alpha:
+            self._bg_alpha = max(self._bg_alpha - step, self._target_alpha)
+        self.update()
+        if abs(self._bg_alpha - self._target_alpha) < 1:
+            self._bg_alpha = self._target_alpha
+            self._fade_timer.stop()
+            self._fading = False
+
+    def _start_fade_out(self):
+        self._bg_r, self._bg_g, self._bg_b = 15, 15, 15
+        self._target_alpha = self._IDLE_ALPHA
+        self._fading = True
+        self._fade_timer.start()
+
+    def add_focus_time(self, secs):
         if self._completed:
             return
         self._focus_secs = min(self._focus_secs + secs, LOCKIN_GOAL_SECS)
@@ -437,29 +467,43 @@ class LockInWidget(QWidget):
         self._bar.setValue(int(self._focus_secs / LOCKIN_GOAL_SECS * 1000))
         if self._focus_secs >= LOCKIN_GOAL_SECS:
             self._completed = True
+            self._fade_timer.stop()
+            self._fade_delay.stop()
             self._title.setText("You did it!")
-            self._title.setStyleSheet(
-                "color: #4caf50; font-size: 13px; font-weight: bold;"
-                "background: transparent;")
+            self._title.setStyleSheet(self._TITLE_DONE)
+            self._bg_r, self._bg_g, self._bg_b = 15, 15, 15
+            self._bg_alpha = 220
             self._bar.setStyleSheet(
                 "QProgressBar { background: #333; border-radius: 5px; }"
                 "QProgressBar::chunk { background: #4caf50; border-radius: 5px; }")
+            self.update()
             self.completed.emit()
 
-    def set_nudge(self, active: bool):
-        """Visually nudge when boredom detected."""
+    def set_nudge(self, active):
         if self._completed:
             return
         if active:
+            self._alert = True
+            self._fading = False
+            self._fade_timer.stop()
+            self._fade_delay.stop()
+            self._bg_r, self._bg_g, self._bg_b = 180, 30, 30
+            self._bg_alpha = 255
+            self._target_alpha = 255
             self._title.setText("Hey — lock back in!")
-            self._title.setStyleSheet(
-                "color: #ef5350; font-size: 13px; font-weight: bold;"
-                "background: transparent;")
+            self._title.setStyleSheet(self._TITLE_ALERT)
+            self.show()
+            self.raise_()
+            self.update()
         else:
-            self._title.setText("Lock In! Focus for 10 min")
-            self._title.setStyleSheet(
-                "color: #1e90ff; font-size: 13px; font-weight: bold;"
-                "background: transparent;")
+            if self._alert:
+                self._alert = False
+                self._title.setText("Lock In! Focus for 10 min")
+                self._title.setStyleSheet(self._TITLE_NORMAL)
+                self._bg_r, self._bg_g, self._bg_b = 15, 15, 15
+                self._bg_alpha = 220
+                self.update()
+                self._fade_delay.start(self.FADE_DURATION_MS)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -470,11 +514,11 @@ class CameraWidget(QLabel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAlignment(Qt.AlignCenter)
-        self.setText("Starting camera…")
+        self.setText("Starting camera...")
         self.setStyleSheet("color: white; font-size: 16px;")
         self.setMinimumSize(640, 480)
 
-    def update_frame(self, bgr_frame: np.ndarray):
+    def update_frame(self, bgr_frame):
         rgb = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         img = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
@@ -487,42 +531,80 @@ class CameraWidget(QLabel):
 #  Main window
 # ═══════════════════════════════════════════════════════════════════════════
 
+_TAB_STYLE = f"""
+QTabWidget::pane {{
+    border: none;
+    background: {_C['bg']};
+}}
+QTabBar {{
+    background: {_C['surface']};
+}}
+QTabBar::tab {{
+    background: {_C['surface']};
+    color: {_C['onSurfV']};
+    padding: 10px 28px;
+    border: none;
+    font-family: 'Inter';
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 2px;
+}}
+QTabBar::tab:selected {{
+    color: {_C['primary']};
+    border-bottom: 2px solid {_C['primary']};
+}}
+QTabBar::tab:hover {{
+    background: {_C['surface2']};
+}}
+"""
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MoodLens")
-        self.setStyleSheet("background-color: #111;")
+        self.setStyleSheet(f"background-color: {_C['bg']};")
 
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Tab widget ───────────────────────────────────────────────────
+        self._tabs = QTabWidget()
+        self._tabs.setStyleSheet(_TAB_STYLE)
+        root.addWidget(self._tabs)
+
+        # Camera tab
+        cam_page = QWidget()
+        cam_page.setStyleSheet(f"background: {_C['bg']};")
+        cam_lay = QVBoxLayout(cam_page)
+        cam_lay.setContentsMargins(0, 0, 0, 0)
+        cam_lay.setSpacing(0)
 
         self._camera = CameraWidget()
-        layout.addWidget(self._camera)
+        cam_lay.addWidget(self._camera)
 
-        # Stress readout
-        self._stress_label = QLabel("Stress: —")
+        self._stress_label = QLabel("Stress: --")
         self._stress_label.setStyleSheet(
-            "color: #ccc; font-size: 13px; padding: 4px 10px;"
-            "background-color: #1a1a1a;")
+            f"color: #ccc; font-size: 13px; padding: 4px 10px;"
+            f"background-color: {_C['surface']};")
         self._stress_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        layout.addWidget(self._stress_label)
+        cam_lay.addWidget(self._stress_label)
 
-        # Bottom bar
         bar = QWidget()
-        bar.setStyleSheet("background-color: #1a1a1a;")
+        bar.setStyleSheet(f"background-color: {_C['surface']};")
         bar_layout = QHBoxLayout(bar)
         bar_layout.setContentsMargins(10, 4, 10, 4)
 
-        self._debug_label = QLabel("Waiting for analysis…")
+        self._debug_label = QLabel("Waiting for analysis...")
         self._debug_label.setStyleSheet("color: #aaa; font-size: 12px;")
         bar_layout.addWidget(self._debug_label, stretch=1)
 
         test_btn = QPushButton("Test Glow")
         test_btn.setStyleSheet(
-            "background:#1e90ff; color:white; border-radius:4px;"
+            f"background:{_C['primaryC']}; color:white; border-radius:4px;"
             "padding: 4px 12px; font-size:12px;")
         test_btn.clicked.connect(self._test_glow)
         bar_layout.addWidget(test_btn)
@@ -532,29 +614,34 @@ class MainWindow(QMainWindow):
             "background:#444; color:white; border-radius:4px;"
             "padding: 4px 12px; font-size:12px;")
         bar_layout.addWidget(hide_btn)
+        cam_lay.addWidget(bar)
 
-        layout.addWidget(bar)
-        self.resize(800, 640)
+        self._tabs.addTab(cam_page, "CAMERA")
+
+        # Dashboard tab
+        self._dashboard = DashboardWidget()
+        self._tabs.addTab(self._dashboard, "DASHBOARD")
+
+        self.resize(900, 680)
 
         # ── Overlays ─────────────────────────────────────────────────────
         self._glow = GlowOverlay()
         self._glow.glow_hidden.connect(self._on_glow_hidden)
         hide_btn.clicked.connect(self._glow.hide_glow)
-
         self._confetti = ConfettiOverlay()
 
-        # Lock-in widget (child of self so it floats over the camera feed)
-        self._lock_in = LockInWidget(self)
+        self._lock_in = LockInWidget()
         self._lock_in.completed.connect(self._on_lockin_complete)
-        self._lock_in.raise_()
+        self._lock_in.show()
 
         # ── State ────────────────────────────────────────────────────────
         self._stress_start    = None
-        self._glow_source     = None   # 'stress' | 'boredom' | None
+        self._glow_source     = None
         self._gaze_away_start = None
-        self._boredom_fired   = False  # one red glow per look-away episode
+        self._boredom_fired   = False
         self._was_looking     = False
         self._gaze_last_time  = None
+        self._total_focus     = 0.0   # tracked for dashboard
 
         # ── Thread ───────────────────────────────────────────────────────
         self._thread = EmotionThread()
@@ -565,33 +652,25 @@ class MainWindow(QMainWindow):
         self._thread.log_message.connect(self._on_log)
         self._thread.start()
 
-    # ── layout helpers ────────────────────────────────────────────────────
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        # Keep lock-in widget pinned to top-right
-        self._lock_in.move(
-            self.width() - self._lock_in.width() - 12, 12)
-        self._lock_in.raise_()
-
     # ── callbacks ────────────────────────────────────────────────────────
 
     def _test_glow(self):
         self._debug_label.setText("Manual test triggered")
         self._glow.show_glow()
 
-    def _on_log(self, msg: str):
+    def _on_log(self, msg):
         print(msg)
         self._debug_label.setText(msg)
 
-    def _on_emotion(self, dominant: str, scores: dict):
+    def _on_emotion(self, dominant, scores):
         top = sorted(scores.items(), key=lambda x: -x[1])
         status = "  |  ".join(f"{e}: {s:.1f}%" for e, s in top[:4])
-        self._debug_label.setText(f"Mood: {dominant.upper()}  —  {status}")
+        self._debug_label.setText(f"Mood: {dominant.upper()}  --  {status}")
+        self._dashboard.update_emotion(dominant, scores)
 
     # ── stress ───────────────────────────────────────────────────────────
 
-    def _on_stress(self, score: float, au_row: dict):
+    def _on_stress(self, score, au_row):
         now = time.monotonic()
 
         if score < 33:
@@ -608,9 +687,10 @@ class MainWindow(QMainWindow):
             f"Stress: {score:.0f}% ({level})    AUs: {au_text}")
         self._stress_label.setStyleSheet(
             f"color: {colour}; font-size: 13px; font-weight: bold;"
-            f"padding: 4px 10px; background-color: #1a1a1a;")
+            f"padding: 4px 10px; background-color: {_C['surface']};")
 
-        # Blue glow — only if boredom glow is not active
+        self._dashboard.update_stress(score)
+
         if score >= STRESS_THRESHOLD:
             if self._stress_start is None:
                 self._stress_start = now
@@ -626,35 +706,34 @@ class MainWindow(QMainWindow):
 
     # ── gaze / boredom ───────────────────────────────────────────────────
 
-    def _on_gaze(self, looking: bool):
+    def _on_gaze(self, looking):
         now = time.monotonic()
 
         if looking:
-            # Accumulate focus time (only between consecutive on-screen frames)
             if self._was_looking and self._gaze_last_time is not None:
                 dt = now - self._gaze_last_time
-                if dt < 1.0:                     # skip implausible gaps
+                if dt < 1.0:
                     self._lock_in.add_focus_time(dt)
+                    self._total_focus += dt
+                    self._dashboard.update_focus(self._total_focus)
 
-            # Reset boredom state
             if self._gaze_away_start is not None:
                 self._gaze_away_start = None
                 self._boredom_fired = False
                 self._lock_in.set_nudge(False)
         else:
-            # Start / continue the away timer
             if self._gaze_away_start is None:
                 self._gaze_away_start = now
                 self._boredom_fired = False
 
             elapsed = now - self._gaze_away_start
             if elapsed >= GAZE_AWAY_SECS and not self._boredom_fired:
-                # Fire red boredom glow (5 s)
                 self._glow.show_glow(
                     QColor(220, 50, 50), duration_ms=BOREDOM_GLOW_MS)
                 self._glow_source = "boredom"
                 self._boredom_fired = True
                 self._lock_in.set_nudge(True)
+                self._dashboard.add_distraction()
 
         self._gaze_last_time = now
         self._was_looking = looking
@@ -662,16 +741,15 @@ class MainWindow(QMainWindow):
     def _on_glow_hidden(self):
         self._glow_source = None
 
-    # ── confetti ─────────────────────────────────────────────────────────
-
     def _on_lockin_complete(self):
+        self._lock_in.show()
+        self._lock_in.raise_()
         self._confetti.show_confetti(duration_ms=8000)
-
-    # ── cleanup ──────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
         self._glow.hide_glow()
         self._confetti.hide_confetti()
+        self._lock_in.close()
         self._thread.stop()
         super().closeEvent(event)
 
