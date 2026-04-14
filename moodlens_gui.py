@@ -11,7 +11,7 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 from deepface import DeepFace
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl
 from PyQt5.QtGui import (
     QImage, QPixmap, QPainter, QColor, QLinearGradient,
     QBrush, QFont, QRadialGradient, QPen,
@@ -23,6 +23,14 @@ from PyQt5.QtWidgets import (
 )
 
 from dashboard import DashboardWidget, _C
+
+try:
+    from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+    _HAS_MEDIA = True
+except ImportError:
+    _HAS_MEDIA = False
+
+_SOUND_PATH = str(pathlib.Path(__file__).parent / "stress_alert.mp3")
 
 # ── tunables ─────────────────────────────────────────────────────────────────
 ANALYZE_EVERY_N_FRAMES = 8
@@ -976,6 +984,12 @@ class MainWindow(QMainWindow):
         self._breathing = BreathingOverlay()
         self._breathing.finished.connect(self._on_breathing_done)
 
+        # ── Sound ─────────────────────────────────────────────────────────
+        self._player = None
+        if _HAS_MEDIA:
+            self._player = QMediaPlayer(self)
+            self._player.setVolume(70)
+
         self._lock_in = LockInWidget()
         self._lock_in.completed.connect(self._on_lockin_complete)
         self._lock_in.show()
@@ -1057,6 +1071,7 @@ class MainWindow(QMainWindow):
             elif (now - self._stress_start) >= STRESS_HOLD_SECS:
                 if not self._warm_tint_dismissed and not self._warm_tint.active:
                     self._warm_tint.show_tint()
+                    self._play_stress_sound()
                 # 15-min break prompt
                 if (not self._stress_break_fired
                         and (now - self._stress_start) >= STRESS_BREAK_SECS):
@@ -1147,6 +1162,15 @@ class MainWindow(QMainWindow):
         if self._warm_tint.active:
             self._warm_tint.hide_tint()
             self._warm_tint_dismissed = True
+
+    def _play_stress_sound(self):
+        """Play the stress alert sound if the dashboard toggle is ON."""
+        if (self._player is not None
+                and self._dashboard.sound_enabled
+                and pathlib.Path(_SOUND_PATH).exists()):
+            url = QUrl.fromLocalFile(_SOUND_PATH)
+            self._player.setMedia(QMediaContent(url))
+            self._player.play()
 
     def _offer_breathing_break(self):
         dlg = StressBreakDialog(self)

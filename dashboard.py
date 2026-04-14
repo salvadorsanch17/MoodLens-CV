@@ -1,7 +1,7 @@
 from collections import defaultdict
 from datetime import datetime
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QFont
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
@@ -171,6 +171,36 @@ class DashboardWidget(QWidget):
         row.addWidget(icon)
         row.addWidget(title)
         row.addStretch()
+
+        # Sound toggle
+        snd_icon = self._lbl("🔔", size=14)
+        snd_icon.setStyleSheet("background: transparent;")
+        row.addWidget(snd_icon)
+
+        from PyQt5.QtWidgets import QPushButton
+        self._sound_btn = QPushButton("Sound: OFF")
+        self._sound_btn.setCheckable(True)
+        self._sound_btn.setChecked(False)
+        self._sound_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {_C['surface3']};
+                color: {_C['onSurfV']};
+                border: 1px solid {_C['outline']};
+                border-radius: 10px;
+                padding: 4px 14px;
+                font-size: 11px;
+                font-weight: 600;
+                font-family: 'Inter';
+            }}
+            QPushButton:checked {{
+                background: {_C['primaryC']};
+                color: #ffffff;
+                border: 1px solid {_C['primary']};
+            }}
+        """)
+        self._sound_btn.toggled.connect(self._on_sound_toggled)
+        row.addWidget(self._sound_btn)
+
         w = QWidget()
         w.setLayout(row)
         w.setStyleSheet("background: transparent;")
@@ -389,6 +419,15 @@ class DashboardWidget(QWidget):
         lay.addLayout(text_col, 1)
 
         self._lay.addWidget(card)
+
+    # ── sound toggle ─────────────────────────────────────────────────────
+
+    def _on_sound_toggled(self, checked):
+        self._sound_btn.setText("Sound: ON" if checked else "Sound: OFF")
+
+    @property
+    def sound_enabled(self):
+        return self._sound_btn.isChecked()
 
     # ── public update API ─────────────────────────────────────────────────
 
