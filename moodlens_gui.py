@@ -61,18 +61,28 @@ LOG_INTERVAL_SECS      = 10        # how often to record an emotion-log entry
 
 
 def _get_active_app() -> str:
-    """Return the name of the frontmost application (macOS only)."""
+    """Return the name of the frontmost application."""
     try:
-        out = subprocess.run(
-            ["osascript", "-e",
-             'tell application "System Events" to get name of first '
-             'application process whose frontmost is true'],
-            capture_output=True, text=True, timeout=2,
-        )
-        name = out.stdout.strip()
-        return name if name else "Unknown"
+        import sys as _sys
+        if _sys.platform == "darwin":
+            out = subprocess.run(
+                ["osascript", "-e",
+                 'tell application "System Events" to get name of first '
+                 'application process whose frontmost is true'],
+                capture_output=True, text=True, timeout=2,
+            )
+            name = out.stdout.strip()
+            return name if name else "Unknown"
+        elif _sys.platform == "win32":
+            import ctypes
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            pid = ctypes.c_ulong()
+            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            import psutil
+            return psutil.Process(pid.value).name()
     except Exception:
-        return "Unknown"
+        pass
+    return "Unknown"
 
 # ── AU stress model ──────────────────────────────────────────────────────────
 AU_STRESS_WEIGHTS = {
