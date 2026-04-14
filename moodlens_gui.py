@@ -36,9 +36,9 @@ _SOUND_PATH = str(pathlib.Path(__file__).parent / "stress_alert.mp3")
 
 # ── tunables ─────────────────────────────────────────────────────────────────
 HAND_ON_FACE_THRESHOLD = 0.18      # % of face ROI that looks like skin
-HAND_ON_FACE_BONUS = 10.0          # direct stress boost when detected
+HAND_ON_FACE_BONUS = 18.0          # direct stress boost when detected
 HAND_ON_FACE_HOLD_FRAMES = 4       # helps avoid flicker
-STRESS_SCALE = 1.10                # raises scores a bit easier
+STRESS_SCALE = 1.05                # raises scores a bit easier
 STRESS_BIAS = 4.0                  # nudges scores upward
 
 ANALYZE_EVERY_N_FRAMES = 5
@@ -47,7 +47,7 @@ AU_SMOOTH_ALPHA        = 0.4
 STRESS_THRESHOLD       = 50.0
 STRESS_HOLD_SECS       = 10
 STRESS_COOLDOWN_SECS   = 60            # stay warm until below threshold this long
-STRESS_BREAK_SECS      = 15 * 60       # prompt a break after this much consecutive stress
+STRESS_BREAK_SECS      = 60       # prompt a break after this much consecutive stress
 GAZE_AWAY_SECS         = 60
 BOREDOM_GLOW_MS        = 5000
 LOCKIN_GOAL_SECS       = 10 * 60
