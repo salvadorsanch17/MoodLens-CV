@@ -6,10 +6,16 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 from deepface import DeepFace
 
+# Run DeepFace every 5 frames
 ANALYZE_EVERY_N_FRAMES = 5
+
+# Run MediaPipe AU-style analysis every 3 frames
 AU_ANALYZE_EVERY_N_FRAMES = 3
+
+# Smoothing factor for AU values
 AU_SMOOTH_ALPHA = 0.6
 
+# Landmark indices used for anger-related features
 _LM = {
     "left_eye_inner": 133,
     "left_eye_outer": 33,
@@ -27,10 +33,12 @@ _LM = {
     "lip_lower_in": 14,
 }
 
+# MediaPipe model path
 _MODEL_PATH = str(pathlib.Path(__file__).parent / "face_landmarker.task")
 
 
 def _create_face_landmarker():
+    # Create MediaPipe face landmarker for video mode
     base_options = mp_python.BaseOptions(model_asset_path=_MODEL_PATH)
     options = mp_vision.FaceLandmarkerOptions(
         base_options=base_options,
@@ -43,13 +51,16 @@ def _create_face_landmarker():
 
 
 def _pt(landmarks, key, w, h):
+    # Convert landmark from normalized coordinates to pixel coordinates
     lm = landmarks[_LM[key]]
     return np.array([lm.x * w, lm.y * h])
 
 
 def compute_angry_aus_from_landmarks(landmarks, img_w: int, img_h: int) -> dict:
+    # Helper to access landmark points
     p = lambda key: _pt(landmarks, key, img_w, img_h)
 
+    # Normalize all distances by inner-eye distance
     eye_l = p("left_eye_inner")
     eye_r = p("right_eye_inner")
     inter_eye = float(np.linalg.norm(eye_r - eye_l))
@@ -61,6 +72,7 @@ def compute_angry_aus_from_landmarks(landmarks, img_w: int, img_h: int) -> dict:
 
     aus = {}
 
+    # AU04: Brow lowerer
     brow_l = p("left_brow_inner")
     brow_r = p("right_brow_inner")
     lid_l = p("left_lid_upper")
@@ -70,6 +82,7 @@ def compute_angry_aus_from_landmarks(landmarks, img_w: int, img_h: int) -> dict:
     avg_gap = (gap_l + gap_r) / 2.0
     aus["AU04"] = float(np.clip((0.55 - avg_gap) / 0.55 * 5.0, 0.0, 5.0))
 
+    # AU07: Lid tightener
     upper_l, lower_l = p("left_lid_upper"), p("left_lid_lower")
     upper_r, lower_r = p("right_lid_upper"), p("right_lid_lower")
     open_l = n(abs(lower_l[1] - upper_l[1]))
@@ -77,6 +90,7 @@ def compute_angry_aus_from_landmarks(landmarks, img_w: int, img_h: int) -> dict:
     avg_open = (open_l + open_r) / 2.0
     aus["AU07"] = float(np.clip((0.30 - avg_open) / 0.30 * 5.0, 0.0, 5.0))
 
+    # AU12: Smile signal, used as a negative cue for anger
     corner_l = p("mouth_left")
     corner_r = p("mouth_right")
     lip_mid_y = (p("lip_upper_in")[1] + p("lip_lower_in")[1]) / 2.0
@@ -84,9 +98,11 @@ def compute_angry_aus_from_landmarks(landmarks, img_w: int, img_h: int) -> dict:
     corner_rise = n(lip_mid_y - corner_avg_y)
     aus["AU12"] = float(np.clip(corner_rise * 8.0 + 2.5, 0.0, 5.0))
 
+    # AU20: Lip stretcher
     lip_width = n(np.linalg.norm(corner_r - corner_l))
     aus["AU20"] = float(np.clip((lip_width - 1.3) / 0.4 * 5.0, 0.0, 5.0))
 
+    # AU23 / AU24: Lip tightener / lip pressor
     inner_gap = n(abs(p("lip_lower_in")[1] - p("lip_upper_in")[1]))
     aus["AU23"] = float(np.clip((0.10 - inner_gap) / 0.10 * 5.0, 0.0, 5.0))
     aus["AU24"] = float(np.clip((0.06 - inner_gap) / 0.06 * 5.0, 0.0, 5.0))
@@ -95,16 +111,22 @@ def compute_angry_aus_from_landmarks(landmarks, img_w: int, img_h: int) -> dict:
 
 
 def detect_angry_aus(landmarker, frame_bgr: np.ndarray, timestamp_ms: int) -> dict | None:
+    # Convert OpenCV frame to RGB
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+    # Detect face landmarks
     result = landmarker.detect_for_video(mp_image, timestamp_ms)
     if not result.face_landmarks:
         return None
+
+    # Compute anger-related AU values
     h, w = frame_bgr.shape[:2]
     return compute_angry_aus_from_landmarks(result.face_landmarks[0], w, h)
 
 
 def compute_angry_score(au_row: dict, deepface_angry: float | None) -> float:
+    # Normalize AU values
     au04 = float(np.clip(au_row.get("AU04", 0.0) / 5.0, 0.0, 1.0))
     au07 = float(np.clip(au_row.get("AU07", 0.0) / 5.0, 0.0, 1.0))
     au20 = float(np.clip(au_row.get("AU20", 0.0) / 5.0, 0.0, 1.0))
@@ -112,6 +134,7 @@ def compute_angry_score(au_row: dict, deepface_angry: float | None) -> float:
     au24 = float(np.clip(au_row.get("AU24", 0.0) / 5.0, 0.0, 1.0))
     au12 = float(np.clip(au_row.get("AU12", 0.0) / 5.0, 0.0, 1.0))
 
+    # Weighted anger score from geometry
     au_score = (
         au04 * 0.30 +
         au07 * 0.20 +
@@ -123,13 +146,16 @@ def compute_angry_score(au_row: dict, deepface_angry: float | None) -> float:
 
     au_score = float(np.clip(au_score, 0.0, 100.0))
 
+    # If DeepFace is unavailable, use AU score only
     if deepface_angry is None:
         return au_score
 
+    # Blend DeepFace anger with AU score
     return float(np.clip(0.6 * deepface_angry + 0.4 * au_score, 0.0, 100.0))
 
 
 def angry_label(score: float):
+    # Convert anger score to label and color
     if score < 35:
         return "Not Angry", (0, 200, 0)
     elif score < 70:
@@ -139,6 +165,7 @@ def angry_label(score: float):
 
 
 def draw_face_box(frame, result):
+    # Draw face bounding box
     region = result.get("region", {})
     x, y, w, h = region.get("x", 0), region.get("y", 0), region.get("w", 0), region.get("h", 0)
     if w > 0 and h > 0:
@@ -146,17 +173,21 @@ def draw_face_box(frame, result):
 
 
 def draw_angry_results(frame, deepface_result, angry_score, au_row):
+    # Get label and bar color
     label, color = angry_label(angry_score)
 
+    # Main output text
     cv2.putText(frame, f"Angry Face: {label}", (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
     cv2.putText(frame, f"Anger Score: {angry_score:.0f}%", (20, 75),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2)
 
+    # Draw anger bar
     bar_width = int(angry_score * 2)
     cv2.rectangle(frame, (20, 95), (220, 115), (60, 60, 60), -1)
     cv2.rectangle(frame, (20, 95), (20 + bar_width, 115), color, -1)
 
+    # Draw DeepFace details
     if deepface_result:
         emotions = deepface_result.get("emotion", {})
         angry_val = emotions.get("angry", 0.0)
@@ -166,6 +197,7 @@ def draw_angry_results(frame, deepface_result, angry_score, au_row):
         cv2.putText(frame, f"Dominant emotion: {dominant}", (20, 170),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
 
+    # Draw AU values
     if au_row:
         cv2.putText(frame, f"AU04 Brow Lowerer: {au_row.get('AU04', 0.0):.2f}/5", (20, 205),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
@@ -180,14 +212,17 @@ def draw_angry_results(frame, deepface_result, angry_score, au_row):
 
 
 def main():
+    # Open webcam
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Error: could not open webcam.")
         return
 
+    # Create landmarker
     landmarker = _create_face_landmarker()
     print("Press 'q' to quit.")
 
+    # State variables
     frame_count = 0
     timestamp_ms = 0
     last_result = None
@@ -196,6 +231,7 @@ def main():
     last_deepface_angry = None
 
     while True:
+        # Read frame
         ret, frame = cap.read()
         if not ret:
             print("Failed to grab frame.")
@@ -204,6 +240,7 @@ def main():
         frame_count += 1
         timestamp_ms += 33
 
+        # DeepFace emotion analysis
         if frame_count % ANALYZE_EVERY_N_FRAMES == 0:
             try:
                 results = DeepFace.analyze(
@@ -218,32 +255,40 @@ def main():
                 last_result = None
                 last_deepface_angry = None
 
+        # MediaPipe anger analysis
         if frame_count % AU_ANALYZE_EVERY_N_FRAMES == 0:
             raw_aus = detect_angry_aus(landmarker, frame, timestamp_ms)
             if raw_aus:
                 if last_au_row is None:
                     last_au_row = raw_aus
                 else:
+                    # Smooth the AU values
                     for au in raw_aus:
                         prev = last_au_row.get(au, raw_aus[au])
                         last_au_row[au] = AU_SMOOTH_ALPHA * prev + (1 - AU_SMOOTH_ALPHA) * raw_aus[au]
 
+                # Compute overall anger score
                 last_angry_score = compute_angry_score(last_au_row, last_deepface_angry)
 
+        # Draw face box
         if last_result:
             draw_face_box(frame, last_result)
 
+        # Draw output or no-face message
         if last_angry_score is not None and last_au_row is not None:
             draw_angry_results(frame, last_result, last_angry_score, last_au_row)
         else:
             cv2.putText(frame, "No face detected", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
+        # Show live window
         cv2.imshow("Angry Face Detector", frame)
 
+        # Quit with q
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
+    # Cleanup
     landmarker.close()
     cap.release()
     cv2.destroyAllWindows()
