@@ -100,7 +100,20 @@ _LM = {
     "lip_upper_in": 13, "lip_lower_in": 14,
 }
 
-_MODEL_PATH = str(pathlib.Path(__file__).parent / "face_landmarker.task")
+_MODEL_PATH      = str(pathlib.Path(__file__).parent / "face_landmarker.task")
+_HAND_MODEL_PATH = str(pathlib.Path(__file__).parent / "hand_landmarker.task")
+
+
+def _create_hand_landmarker():
+    base_options = mp_python.BaseOptions(model_asset_path=_HAND_MODEL_PATH)
+    options = mp_vision.HandLandmarkerOptions(
+        base_options=base_options,
+        running_mode=mp_vision.RunningMode.VIDEO,
+        num_hands=2,
+        min_hand_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+    return mp_vision.HandLandmarker.create_from_options(options)
 
 
 def _create_face_landmarker():
@@ -175,7 +188,7 @@ def detect_hand_on_face(frame_bgr, face_landmarks, hand_results):
     hand_results: output of mp.solutions.hands.Hands.process()
     Returns (detected: bool, confidence: float 0-1)
     """
-    if hand_results is None or not hand_results.multi_hand_landmarks:
+    if hand_results is None or not hand_results.hand_landmarks:
         return False, 0.0
 
     h, w = frame_bgr.shape[:2]
@@ -197,12 +210,12 @@ def detect_hand_on_face(frame_bgr, face_landmarks, hand_results):
     fy2 = min(h - 1, max(ys) + pad_y)
 
     best_ratio = 0.0
-    for hand_lms in hand_results.multi_hand_landmarks:
+    for hand_lms in hand_results.hand_landmarks:
         hits = sum(
-            1 for lm in hand_lms.landmark
+            1 for lm in hand_lms
             if fx1 <= lm.x * w <= fx2 and fy1 <= lm.y * h <= fy2
         )
-        ratio = hits / len(hand_lms.landmark)   # 21 landmarks total
+        ratio = hits / len(hand_lms)   # 21 landmarks total
         if ratio > best_ratio:
             best_ratio = ratio
 
@@ -244,13 +257,8 @@ class EmotionThread(QThread):
             self.log_message.emit("ERROR: Could not open webcam")
             return
 
-        landmarker = _create_face_landmarker()
-        hand_detector = mp.solutions.hands.Hands(
-            static_image_mode=False,
-            max_num_hands=2,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
+        landmarker    = _create_face_landmarker()
+        hand_landmarker = _create_hand_landmarker() if pathlib.Path(_HAND_MODEL_PATH).exists() else None
         timestamp_ms = 0
         frame_count = 0
         smooth_aus = None
@@ -282,10 +290,11 @@ class EmotionThread(QThread):
             if frame_count % AU_ANALYZE_EVERY_N_FRAMES == 0:
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                # Run hand detection on the same RGB frame
-                last_hand_results = hand_detector.process(rgb)
-
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+                # Run hand detection if model is available
+                if hand_landmarker is not None:
+                    last_hand_results = hand_landmarker.detect_for_video(mp_image, timestamp_ms)
                 mp_result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
                 if mp_result.face_landmarks:
@@ -322,7 +331,8 @@ class EmotionThread(QThread):
                     self.gaze_status.emit(False)
 
         landmarker.close()
-        hand_detector.close()
+        if hand_landmarker is not None:
+            hand_landmarker.close()
         cap.release()
 
     def stop(self):
