@@ -6,10 +6,16 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 from deepface import DeepFace
 
+# Run DeepFace every 5 frames
 ANALYZE_EVERY_N_FRAMES = 5
+
+# Run MediaPipe facial geometry analysis every 3 frames
 AU_ANALYZE_EVERY_N_FRAMES = 3
+
+# Smoothing factor for facial signals
 AU_SMOOTH_ALPHA = 0.6
 
+# Landmark indices used for sadness cues
 _LM = {
     "left_eye_inner": 133,
     "left_eye_outer": 33,
@@ -27,10 +33,12 @@ _LM = {
     "lip_lower_in": 14,
 }
 
+# Path to MediaPipe face model
 _MODEL_PATH = str(pathlib.Path(__file__).parent / "face_landmarker.task")
 
 
 def _create_face_landmarker():
+    # Build MediaPipe face landmarker
     base_options = mp_python.BaseOptions(model_asset_path=_MODEL_PATH)
     options = mp_vision.FaceLandmarkerOptions(
         base_options=base_options,
@@ -43,13 +51,16 @@ def _create_face_landmarker():
 
 
 def _pt(landmarks, key, w, h):
+    # Convert normalized landmark to pixel coordinates
     lm = landmarks[_LM[key]]
     return np.array([lm.x * w, lm.y * h])
 
 
 def compute_sad_aus_from_landmarks(landmarks, img_w: int, img_h: int) -> dict:
+    # Point helper
     p = lambda key: _pt(landmarks, key, img_w, img_h)
 
+    # Normalize by inter-eye distance
     eye_l = p("left_eye_inner")
     eye_r = p("right_eye_inner")
     inter_eye = float(np.linalg.norm(eye_r - eye_l))
@@ -61,6 +72,7 @@ def compute_sad_aus_from_landmarks(landmarks, img_w: int, img_h: int) -> dict:
 
     aus = {}
 
+    # Smaller eye opening can be a sadness cue
     upper_l, lower_l = p("left_lid_upper"), p("left_lid_lower")
     upper_r, lower_r = p("right_lid_upper"), p("right_lid_lower")
     open_l = n(abs(lower_l[1] - upper_l[1]))
@@ -68,18 +80,24 @@ def compute_sad_aus_from_landmarks(landmarks, img_w: int, img_h: int) -> dict:
     avg_open = (open_l + open_r) / 2.0
     aus["EyeClosure"] = float(np.clip((0.28 - avg_open) / 0.18 * 5.0, 0.0, 5.0))
 
+    # Mouth corners lower in sadness
     corner_l = p("mouth_left")
     corner_r = p("mouth_right")
     lip_mid_y = (p("lip_upper_in")[1] + p("lip_lower_in")[1]) / 2.0
     corner_avg_y = (corner_l[1] + corner_r[1]) / 2.0
     corner_rise = n(lip_mid_y - corner_avg_y)
 
+    # AU12 smile is included as a negative signal
     aus["AU12"] = float(np.clip(corner_rise * 8.0 + 2.5, 0.0, 5.0))
+
+    # Mouth corner depressor approximation
     aus["MouthCornerDepressor"] = float(np.clip((-corner_rise + 0.15) / 0.45 * 5.0, 0.0, 5.0))
 
+    # Smaller mouth width can correlate with subdued expression
     lip_width = n(np.linalg.norm(corner_r - corner_l))
     aus["LipStretchLow"] = float(np.clip((1.25 - lip_width) / 0.35 * 5.0, 0.0, 5.0))
 
+    # Raised inner brows are common in sadness
     brow_l = p("left_brow_inner")
     brow_r = p("right_brow_inner")
     lid_top_y = (p("left_lid_upper")[1] + p("right_lid_upper")[1]) / 2.0
@@ -91,22 +109,29 @@ def compute_sad_aus_from_landmarks(landmarks, img_w: int, img_h: int) -> dict:
 
 
 def detect_sad_aus(landmarker, frame_bgr: np.ndarray, timestamp_ms: int) -> dict | None:
+    # Convert BGR frame to RGB
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+    # Detect landmarks
     result = landmarker.detect_for_video(mp_image, timestamp_ms)
     if not result.face_landmarks:
         return None
+
+    # Compute sadness-related geometry
     h, w = frame_bgr.shape[:2]
     return compute_sad_aus_from_landmarks(result.face_landmarks[0], w, h)
 
 
 def compute_sad_score(au_row: dict, deepface_sad: float | None) -> float:
+    # Normalize features to 0-1
     eye_closure = float(np.clip(au_row.get("EyeClosure", 0.0) / 5.0, 0.0, 1.0))
     mouth_down = float(np.clip(au_row.get("MouthCornerDepressor", 0.0) / 5.0, 0.0, 1.0))
     lip_stretch_low = float(np.clip(au_row.get("LipStretchLow", 0.0) / 5.0, 0.0, 1.0))
     inner_brow_raise = float(np.clip(au_row.get("InnerBrowRaise", 0.0) / 5.0, 0.0, 1.0))
     smile = float(np.clip(au_row.get("AU12", 0.0) / 5.0, 0.0, 1.0))
 
+    # Weighted sadness score
     au_score = (
         eye_closure * 0.20 +
         mouth_down * 0.35 +
@@ -117,13 +142,16 @@ def compute_sad_score(au_row: dict, deepface_sad: float | None) -> float:
 
     au_score = float(np.clip(au_score, 0.0, 100.0))
 
+    # If DeepFace unavailable, use AU score only
     if deepface_sad is None:
         return au_score
 
+    # Blend DeepFace sadness with geometry-based score
     return float(np.clip(0.6 * deepface_sad + 0.4 * au_score, 0.0, 100.0))
 
 
 def sad_label(score: float):
+    # Convert score into label and color
     if score < 35:
         return "Not Sad", (0, 200, 0)
     elif score < 70:
@@ -133,6 +161,7 @@ def sad_label(score: float):
 
 
 def draw_face_box(frame, result):
+    # Draw face rectangle from DeepFace region output
     region = result.get("region", {})
     x, y, w, h = region.get("x", 0), region.get("y", 0), region.get("w", 0), region.get("h", 0)
     if w > 0 and h > 0:
@@ -140,17 +169,21 @@ def draw_face_box(frame, result):
 
 
 def draw_sad_results(frame, deepface_result, sad_score, au_row):
+    # Get status label and display color
     label, color = sad_label(sad_score)
 
+    # Draw main sadness label and score
     cv2.putText(frame, f"Sad Face: {label}", (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
     cv2.putText(frame, f"Sadness Score: {sad_score:.0f}%", (20, 75),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2)
 
+    # Draw score bar
     bar_width = int(sad_score * 2)
     cv2.rectangle(frame, (20, 95), (220, 115), (60, 60, 60), -1)
     cv2.rectangle(frame, (20, 95), (20 + bar_width, 115), color, -1)
 
+    # Show DeepFace sadness if present
     if deepface_result:
         emotions = deepface_result.get("emotion", {})
         sad_val = emotions.get("sad", 0.0)
@@ -160,6 +193,7 @@ def draw_sad_results(frame, deepface_result, sad_score, au_row):
         cv2.putText(frame, f"Dominant emotion: {dominant}", (20, 170),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
 
+    # Show AU/geometry values
     if au_row:
         cv2.putText(frame, f"Eye Closure: {au_row.get('EyeClosure', 0.0):.2f}/5", (20, 205),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
@@ -172,14 +206,17 @@ def draw_sad_results(frame, deepface_result, sad_score, au_row):
 
 
 def main():
+    # Start webcam
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Error: could not open webcam.")
         return
 
+    # Create landmark detector
     landmarker = _create_face_landmarker()
     print("Press 'q' to quit.")
 
+    # State variables
     frame_count = 0
     timestamp_ms = 0
     last_result = None
@@ -188,6 +225,7 @@ def main():
     last_deepface_sad = None
 
     while True:
+        # Read frame
         ret, frame = cap.read()
         if not ret:
             print("Failed to grab frame.")
@@ -196,6 +234,7 @@ def main():
         frame_count += 1
         timestamp_ms += 33
 
+        # Run DeepFace periodically
         if frame_count % ANALYZE_EVERY_N_FRAMES == 0:
             try:
                 results = DeepFace.analyze(
@@ -210,32 +249,40 @@ def main():
                 last_result = None
                 last_deepface_sad = None
 
+        # Run MediaPipe AU-based sadness detection
         if frame_count % AU_ANALYZE_EVERY_N_FRAMES == 0:
             raw_aus = detect_sad_aus(landmarker, frame, timestamp_ms)
             if raw_aus:
                 if last_au_row is None:
                     last_au_row = raw_aus
                 else:
+                    # Smooth values to reduce noise
                     for au in raw_aus:
                         prev = last_au_row.get(au, raw_aus[au])
                         last_au_row[au] = AU_SMOOTH_ALPHA * prev + (1 - AU_SMOOTH_ALPHA) * raw_aus[au]
 
+                # Compute final sadness score
                 last_sad_score = compute_sad_score(last_au_row, last_deepface_sad)
 
+        # Draw face box
         if last_result:
             draw_face_box(frame, last_result)
 
+        # Draw output or no-face message
         if last_sad_score is not None and last_au_row is not None:
             draw_sad_results(frame, last_result, last_sad_score, last_au_row)
         else:
             cv2.putText(frame, "No face detected", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
+        # Show live result
         cv2.imshow("Sad Face Detector", frame)
 
+        # Quit on q
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
+    # Cleanup
     landmarker.close()
     cap.release()
     cv2.destroyAllWindows()
