@@ -15,7 +15,7 @@ from collections import deque
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl
 from PyQt5.QtGui import (
     QImage, QPixmap, QPainter, QColor, QLinearGradient,
-    QBrush, QFont, QRadialGradient, QPen,
+    QBrush, QFont, QRadialGradient, QPen, QIcon,
 )
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QWidget,
@@ -1023,6 +1023,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MoodLens")
+        _icon_path = pathlib.Path(__file__).parent / "icon_1024.png"
+        if _icon_path.exists():
+            self.setWindowIcon(QIcon(str(_icon_path)))
         self.setStyleSheet(f"background-color: {_C['bg']};")
 
         central = QWidget()

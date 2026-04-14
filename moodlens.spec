@@ -11,6 +11,7 @@ block_cipher = None
 added_files = [
     ("face_landmarker.task", "."),
     ("stress_alert.mp3",     "."),
+    ("icon_1024.png",        "."),
 ]
 
 # Collect mediapipe model/data files
