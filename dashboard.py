@@ -5,7 +5,7 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QFont
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
-    QScrollArea, QGridLayout, QSizePolicy, QPushButton,
+    QScrollArea, QGridLayout, QSizePolicy, QPushButton, QComboBox,
 )
 
 # ── design tokens (from The Sentient Interface) ──────────────────────────────
@@ -263,6 +263,30 @@ class DashboardWidget(QWidget):
         self._sound_btn.toggled.connect(self._on_sound_toggled)
         row.addWidget(self._sound_btn)
 
+        self._sound_selector = QComboBox()
+        self._sound_selector.addItem("Rain", "stress_alert.mp3")
+        self._sound_selector.addItem("Brown Noise", "brown_noise.mp3")
+        self._sound_selector.setStyleSheet(f"""
+            QComboBox {{
+                background: {_C['surface3']};
+                color: {_C['onSurfV']};
+                border: 1px solid {_C['outline']};
+                border-radius: 10px;
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: 600;
+                font-family: 'Inter';
+            }}
+            QComboBox::drop-down {{ border: none; width: 18px; }}
+            QComboBox QAbstractItemView {{
+                background: {_C['surface3']};
+                color: {_C['onSurf']};
+                selection-background-color: {_C['primaryC']};
+                border: 1px solid {_C['outline']};
+            }}
+        """)
+        row.addWidget(self._sound_selector)
+
         w = QWidget()
         w.setLayout(row)
         w.setStyleSheet("background: transparent;")
@@ -490,6 +514,11 @@ class DashboardWidget(QWidget):
     @property
     def sound_enabled(self):
         return self._sound_btn.isChecked()
+
+    @property
+    def selected_sound(self) -> str:
+        """Returns the filename of the currently selected sound."""
+        return self._sound_selector.currentData()
 
     # ── public update API ─────────────────────────────────────────────────
 

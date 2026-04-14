@@ -1110,6 +1110,7 @@ class MainWindow(QMainWindow):
             self._player = QMediaPlayer(self)
             self._player.setVolume(70)
             self._dashboard._sound_btn.toggled.connect(self._on_sound_toggle)
+            self._dashboard._sound_selector.currentIndexChanged.connect(self._on_sound_changed)
 
         # ── Stress feedback banner ─────────────────────────────────────────
         self._dashboard.false_positive_clicked.connect(self._on_false_positive)
@@ -1318,17 +1319,31 @@ class MainWindow(QMainWindow):
         self._warm_tint_dismissed = True
 
     def _on_sound_toggle(self, checked):
-        if not checked and self._player is not None:
-            self._player.stop()
+        if not checked:
+            if self._player is not None:
+                self._player.stop()
+        else:
+            # If stress is already active and held, start sound immediately
+            if (self._stress_start is not None
+                    and (time.monotonic() - self._stress_start) >= STRESS_HOLD_SECS):
+                self._play_stress_sound()
+                self._stress_sound_played = True
+
+    def _on_sound_changed(self):
+        """Swap sound immediately if one is currently playing."""
+        if (self._player is not None
+                and self._player.state() == QMediaPlayer.PlayingState):
+            self._play_stress_sound()
 
     def _play_stress_sound(self):
-        """Play the stress alert sound if the dashboard toggle is ON."""
-        if (self._player is not None
-                and self._dashboard.sound_enabled
-                and pathlib.Path(_SOUND_PATH).exists()):
-            url = QUrl.fromLocalFile(_SOUND_PATH)
-            self._player.setMedia(QMediaContent(url))
-            self._player.play()
+        """Play the selected stress sound if the dashboard toggle is ON."""
+        if self._player is None or not self._dashboard.sound_enabled:
+            return
+        sound_file = pathlib.Path(__file__).parent / self._dashboard.selected_sound
+        if not sound_file.exists():
+            return
+        self._player.setMedia(QMediaContent(QUrl.fromLocalFile(str(sound_file))))
+        self._player.play()
 
     def _offer_breathing_break(self):
         dlg = StressBreakDialog(self)
