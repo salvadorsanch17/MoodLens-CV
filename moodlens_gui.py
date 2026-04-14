@@ -27,6 +27,7 @@ AU_ANALYZE_EVERY_N_FRAMES = 3
 AU_SMOOTH_ALPHA        = 0.6
 STRESS_THRESHOLD       = 50.0
 STRESS_HOLD_SECS       = 10
+STRESS_COOLDOWN_SECS   = 60            # stay warm until below threshold this long
 GAZE_AWAY_SECS         = 60
 BOREDOM_GLOW_MS        = 5000
 LOCKIN_GOAL_SECS       = 10 * 60
@@ -300,6 +301,89 @@ class GlowOverlay(QWidget):
         p.drawRect(r.left(), r.top(), d, r.height())
         p.setBrush(g(r.right(), 0, r.right() - d, 0))
         p.drawRect(r.right() - d, r.top(), d, r.height())
+        p.end()
+
+
+class WarmTintOverlay(QWidget):
+    """Full-screen warm colour wash – click-through."""
+
+    FADE_STEP_MS   = 30
+    FADE_IN_STEPS  = 20        # ~600 ms fade-in
+    FADE_OUT_STEPS = 30        # ~900 ms fade-out
+    MAX_ALPHA      = 38        # very subtle warmth (0-255)
+
+    tint_hidden = pyqtSignal()
+
+    def __init__(self):
+        super().__init__(None)
+        self.setWindowFlags(
+            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+            | Qt.Window | Qt.WindowDoesNotAcceptFocus
+            | Qt.WindowTransparentForInput)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setGeometry(QApplication.primaryScreen().geometry())
+
+        self._alpha = 0.0
+        self._target_alpha = 0.0
+        self._active = False
+        self._color = QColor(255, 140, 50)   # warm amber
+
+        self._fade_timer = QTimer(self)
+        self._fade_timer.setInterval(self.FADE_STEP_MS)
+        self._fade_timer.timeout.connect(self._tick)
+
+    # -- public API --------------------------------------------------------
+
+    @property
+    def active(self):
+        return self._active
+
+    def show_tint(self):
+        if self._active:
+            return
+        self._active = True
+        self._target_alpha = self.MAX_ALPHA
+        self.show()
+        self.raise_()
+        self._fade_timer.start()
+
+    def hide_tint(self):
+        if not self._active:
+            return
+        self._active = False
+        self._target_alpha = 0.0
+        self._fade_timer.start()          # fade-out happens in _tick
+
+    # -- internals ---------------------------------------------------------
+
+    def _tick(self):
+        if self._alpha < self._target_alpha:
+            step = self.MAX_ALPHA / self.FADE_IN_STEPS
+            self._alpha = min(self._alpha + step, self._target_alpha)
+        elif self._alpha > self._target_alpha:
+            step = self.MAX_ALPHA / self.FADE_OUT_STEPS
+            self._alpha = max(self._alpha - step, self._target_alpha)
+
+        self.update()
+
+        if abs(self._alpha - self._target_alpha) < 0.5:
+            self._alpha = self._target_alpha
+            self._fade_timer.stop()
+            if self._alpha == 0:
+                self.hide()
+                self.tint_hidden.emit()
+
+    def paintEvent(self, _):
+        if self._alpha <= 0:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(
+            self._color.red(), self._color.green(),
+            self._color.blue(), int(self._alpha)))
+        p.drawRect(self.rect())
         p.end()
 
 
@@ -631,6 +715,14 @@ class MainWindow(QMainWindow):
             "background:#444; color:white; border-radius:4px;"
             "padding: 4px 12px; font-size:12px;")
         bar_layout.addWidget(hide_btn)
+
+        self._warm_btn = QPushButton("Dismiss Warm Tint")
+        self._warm_btn.setStyleSheet(
+            "background:#8B4513; color:white; border-radius:4px;"
+            "padding: 4px 12px; font-size:12px;")
+        self._warm_btn.clicked.connect(self._toggle_warm_tint)
+        bar_layout.addWidget(self._warm_btn)
+
         cam_lay.addWidget(bar)
 
         self._tabs.addTab(cam_page, "CAMERA")
@@ -646,6 +738,10 @@ class MainWindow(QMainWindow):
         self._glow.glow_hidden.connect(self._on_glow_hidden)
         hide_btn.clicked.connect(self._glow.hide_glow)
         self._confetti = ConfettiOverlay()
+        self._warm_tint = WarmTintOverlay()
+        self._warm_tint.tint_hidden.connect(self._on_warm_tint_hidden)
+        self._warm_tint_dismissed = False   # user manually dismissed
+        self._stress_below_start  = None    # when stress first dropped below threshold
 
         self._lock_in = LockInWidget()
         self._lock_in.completed.connect(self._on_lockin_complete)
@@ -721,17 +817,24 @@ class MainWindow(QMainWindow):
         self._dashboard.update_stress(score)
 
         if score >= STRESS_THRESHOLD:
+            self._stress_below_start = None          # reset cooldown
             if self._stress_start is None:
                 self._stress_start = now
             elif (now - self._stress_start) >= STRESS_HOLD_SECS:
-                if self._glow_source != "boredom":
-                    if not self._glow.active:
-                        self._glow.show_glow(QColor(30, 144, 255))
-                        self._glow_source = "stress"
+                if not self._warm_tint_dismissed and not self._warm_tint.active:
+                    self._warm_tint.show_tint()
         else:
             self._stress_start = None
-            if self._glow.active and self._glow_source == "stress":
-                self._glow.hide_glow()
+            if self._warm_tint.active:
+                # start cooldown clock the first frame below threshold
+                if self._stress_below_start is None:
+                    self._stress_below_start = now
+                elif (now - self._stress_below_start) >= STRESS_COOLDOWN_SECS:
+                    self._warm_tint.hide_tint()
+                    self._stress_below_start = None
+            else:
+                self._stress_below_start = None
+                self._warm_tint_dismissed = False   # reset dismiss so next spike works
 
     # ── gaze / boredom ───────────────────────────────────────────────────
 
@@ -797,6 +900,14 @@ class MainWindow(QMainWindow):
     def _on_glow_hidden(self):
         self._glow_source = None
 
+    def _on_warm_tint_hidden(self):
+        pass  # future hook
+
+    def _toggle_warm_tint(self):
+        if self._warm_tint.active:
+            self._warm_tint.hide_tint()
+            self._warm_tint_dismissed = True
+
     def _on_lockin_complete(self):
         self._lock_in.show()
         self._lock_in.raise_()
@@ -804,6 +915,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._glow.hide_glow()
+        self._warm_tint.hide_tint()
         self._confetti.hide_confetti()
         self._lock_in.close()
         self._thread.stop()
