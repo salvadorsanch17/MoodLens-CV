@@ -1206,9 +1206,11 @@ class MainWindow(QMainWindow):
             if self._stress_start is None:
                 self._stress_start = now
             elif (now - self._stress_start) >= STRESS_HOLD_SECS:
+                if not self._stress_sound_played:
+                    self._play_stress_sound()
+                    self._stress_sound_played = True
                 if not self._warm_tint_dismissed and not self._warm_tint.active:
                     self._warm_tint.show_tint()
-                    self._play_stress_sound()
                     self._dashboard.show_stress_banner()
                 # 15-min break prompt
                 if (not self._stress_break_fired
