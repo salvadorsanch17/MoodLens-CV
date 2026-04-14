@@ -12,11 +12,14 @@ from mediapipe.tasks.python import vision as mp_vision
 from deepface import DeepFace
 
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QColor, QLinearGradient, QBrush
+from PyQt5.QtGui import (
+    QImage, QPixmap, QPainter, QColor, QLinearGradient,
+    QBrush, QFont, QRadialGradient, QPen,
+)
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QWidget,
     QVBoxLayout, QPushButton, QHBoxLayout, QProgressBar,
-    QTabWidget,
+    QTabWidget, QDialog,
 )
 
 from dashboard import DashboardWidget, _C
@@ -28,6 +31,7 @@ AU_SMOOTH_ALPHA        = 0.6
 STRESS_THRESHOLD       = 50.0
 STRESS_HOLD_SECS       = 10
 STRESS_COOLDOWN_SECS   = 60            # stay warm until below threshold this long
+STRESS_BREAK_SECS      = 15 * 60       # prompt a break after this much consecutive stress
 GAZE_AWAY_SECS         = 60
 BOREDOM_GLOW_MS        = 5000
 LOCKIN_GOAL_SECS       = 10 * 60
@@ -387,6 +391,233 @@ class WarmTintOverlay(QWidget):
         p.end()
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  Breathing exercise overlay
+# ═══════════════════════════════════════════════════════════════════════════
+
+class BreathingOverlay(QWidget):
+    """Full-screen guided-breathing orb (4-7-8 pattern)."""
+
+    # Phase durations in seconds
+    INHALE_SECS  = 4
+    HOLD_SECS    = 7
+    EXHALE_SECS  = 8
+    CYCLES       = 3               # number of full breath cycles
+    TICK_MS      = 30
+
+    finished = pyqtSignal()
+
+    def __init__(self):
+        super().__init__(None)
+        self.setWindowFlags(
+            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Window)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setGeometry(QApplication.primaryScreen().geometry())
+
+        self._active = False
+        self._phase = "inhale"     # inhale | hold | exhale
+        self._phase_t = 0.0       # time into current phase (secs)
+        self._cycle = 0
+        self._orb_frac = 0.0      # 0 = smallest, 1 = largest
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.TICK_MS)
+        self._timer.timeout.connect(self._tick)
+
+        # Close button
+        self._close_btn = QPushButton("✕  End session", self)
+        self._close_btn.setStyleSheet(
+            "background: rgba(255,255,255,30); color: #ddd;"
+            "border: 1px solid rgba(255,255,255,60); border-radius: 16px;"
+            "padding: 8px 22px; font-size: 13px; font-weight: 600;")
+        self._close_btn.clicked.connect(self.stop)
+        self._close_btn.adjustSize()
+
+    # -- public API --------------------------------------------------------
+
+    def start(self):
+        if self._active:
+            return
+        self._active = True
+        self._phase = "inhale"
+        self._phase_t = 0.0
+        self._cycle = 0
+        self._orb_frac = 0.0
+        # position close button bottom-centre
+        scr = self.geometry()
+        bw = self._close_btn.sizeHint().width()
+        self._close_btn.move(scr.width() // 2 - bw // 2, scr.height() - 80)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._timer.start()
+
+    def stop(self):
+        if not self._active:
+            return
+        self._active = False
+        self._timer.stop()
+        self.hide()
+        self.finished.emit()
+
+    # -- internals ---------------------------------------------------------
+
+    def _phase_duration(self):
+        if self._phase == "inhale":
+            return self.INHALE_SECS
+        elif self._phase == "hold":
+            return self.HOLD_SECS
+        return self.EXHALE_SECS
+
+    def _tick(self):
+        dt = self.TICK_MS / 1000.0
+        self._phase_t += dt
+        dur = self._phase_duration()
+
+        # normalised progress within this phase
+        t = min(self._phase_t / dur, 1.0)
+
+        if self._phase == "inhale":
+            self._orb_frac = t
+        elif self._phase == "hold":
+            self._orb_frac = 1.0
+        else:  # exhale
+            self._orb_frac = 1.0 - t
+
+        # advance phase?
+        if self._phase_t >= dur:
+            self._phase_t = 0.0
+            if self._phase == "inhale":
+                self._phase = "hold"
+            elif self._phase == "hold":
+                self._phase = "exhale"
+            else:
+                self._cycle += 1
+                if self._cycle >= self.CYCLES:
+                    self.stop()
+                    return
+                self._phase = "inhale"
+
+        self.update()
+
+    def _label_text(self):
+        if self._phase == "inhale":
+            return "Breathe in…"
+        elif self._phase == "hold":
+            return "Hold…"
+        return "Breathe out…"
+
+    def paintEvent(self, _):
+        if not self._active:
+            return
+        w, h = self.width(), self.height()
+        cx, cy = w / 2, h / 2 - 30
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+
+        # dim background
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(10, 10, 18, 210))
+        p.drawRect(self.rect())
+
+        # orb size
+        min_r, max_r = 60, 160
+        r = min_r + (max_r - min_r) * self._orb_frac
+
+        # radial gradient orb
+        grad = QRadialGradient(cx, cy, r)
+        # colour shifts from cool-blue (exhale) to warm-teal (inhale)
+        base_h = 190 - 30 * self._orb_frac          # hue 190→160
+        core = QColor.fromHslF(base_h / 360, 0.65, 0.62, 0.95)
+        mid  = QColor.fromHslF(base_h / 360, 0.50, 0.45, 0.55)
+        edge = QColor.fromHslF(base_h / 360, 0.40, 0.30, 0.0)
+        grad.setColorAt(0.0, core)
+        grad.setColorAt(0.55, mid)
+        grad.setColorAt(1.0, edge)
+        p.setBrush(QBrush(grad))
+        p.drawEllipse(int(cx - r), int(cy - r), int(2 * r), int(2 * r))
+
+        # soft glow ring
+        ring_pen = QPen(QColor(core.red(), core.green(), core.blue(), 50))
+        ring_pen.setWidthF(3.0)
+        p.setPen(ring_pen)
+        p.setBrush(Qt.NoBrush)
+        ring_r = r + 18 + 6 * math.sin(self._phase_t * 1.2)
+        p.drawEllipse(int(cx - ring_r), int(cy - ring_r),
+                      int(2 * ring_r), int(2 * ring_r))
+
+        # phase label
+        p.setPen(QColor(230, 230, 230, 220))
+        font = QFont("Inter", 22)
+        font.setWeight(QFont.Light)
+        p.setFont(font)
+        label_rect = self.rect().adjusted(0, int(cy + max_r + 30), 0, 0)
+        p.drawText(label_rect, Qt.AlignHCenter | Qt.AlignTop, self._label_text())
+
+        # cycle counter
+        p.setPen(QColor(180, 180, 180, 150))
+        small = QFont("Inter", 12)
+        p.setFont(small)
+        count_rect = label_rect.adjusted(0, 40, 0, 0)
+        p.drawText(count_rect, Qt.AlignHCenter | Qt.AlignTop,
+                   f"Cycle {self._cycle + 1} of {self.CYCLES}")
+        p.end()
+
+
+class StressBreakDialog(QDialog):
+    """Dark-themed dialog asking the user if they want a breathing break."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("MoodLens – Take a Break?")
+        self.setFixedSize(420, 220)
+        self.setStyleSheet(
+            "background: #1a1a2e; color: #e0e0e0; font-family: 'Inter';")
+        self.setWindowFlags(
+            self.windowFlags() | Qt.WindowStaysOnTopHint)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(30, 28, 30, 22)
+        lay.setSpacing(14)
+
+        icon_lbl = QLabel("😮‍💨")
+        icon_lbl.setAlignment(Qt.AlignCenter)
+        icon_lbl.setStyleSheet("font-size: 36px; background: transparent;")
+        lay.addWidget(icon_lbl)
+
+        msg = QLabel(
+            "You've been stressed for 15 minutes.\n"
+            "Would you like to take a short breathing break?")
+        msg.setAlignment(Qt.AlignCenter)
+        msg.setWordWrap(True)
+        msg.setStyleSheet(
+            "font-size: 14px; color: #ccc; background: transparent;")
+        lay.addWidget(msg)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(16)
+
+        yes_btn = QPushButton("Yes, let's breathe")
+        yes_btn.setStyleSheet(
+            "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #1e90ff, stop:1 #00e5ff);"
+            "color: white; border: none; border-radius: 8px;"
+            "padding: 10px 24px; font-size: 13px; font-weight: 600;")
+        yes_btn.clicked.connect(self.accept)
+        btn_row.addWidget(yes_btn)
+
+        no_btn = QPushButton("Not now")
+        no_btn.setStyleSheet(
+            "background: #333; color: #aaa; border: 1px solid #444;"
+            "border-radius: 8px; padding: 10px 24px;"
+            "font-size: 13px; font-weight: 600;")
+        no_btn.clicked.connect(self.reject)
+        btn_row.addWidget(no_btn)
+
+        lay.addLayout(btn_row)
+
+
 class ConfettiOverlay(QWidget):
     def __init__(self):
         super().__init__(None)
@@ -742,19 +973,22 @@ class MainWindow(QMainWindow):
         self._warm_tint.tint_hidden.connect(self._on_warm_tint_hidden)
         self._warm_tint_dismissed = False   # user manually dismissed
         self._stress_below_start  = None    # when stress first dropped below threshold
+        self._breathing = BreathingOverlay()
+        self._breathing.finished.connect(self._on_breathing_done)
 
         self._lock_in = LockInWidget()
         self._lock_in.completed.connect(self._on_lockin_complete)
         self._lock_in.show()
 
         # ── State ────────────────────────────────────────────────────────
-        self._stress_start    = None
-        self._glow_source     = None
-        self._gaze_away_start = None
-        self._boredom_fired   = False
-        self._was_looking     = False
-        self._gaze_last_time  = None
-        self._total_focus     = 0.0   # tracked for dashboard
+        self._stress_start      = None
+        self._glow_source       = None
+        self._gaze_away_start   = None
+        self._boredom_fired     = False
+        self._was_looking       = False
+        self._gaze_last_time    = None
+        self._total_focus       = 0.0   # tracked for dashboard
+        self._stress_break_fired = False  # only prompt once per sustained episode
 
         self._last_emotion    = "neutral"
         self._last_stress     = 0.0
@@ -823,8 +1057,14 @@ class MainWindow(QMainWindow):
             elif (now - self._stress_start) >= STRESS_HOLD_SECS:
                 if not self._warm_tint_dismissed and not self._warm_tint.active:
                     self._warm_tint.show_tint()
+                # 15-min break prompt
+                if (not self._stress_break_fired
+                        and (now - self._stress_start) >= STRESS_BREAK_SECS):
+                    self._stress_break_fired = True
+                    self._offer_breathing_break()
         else:
             self._stress_start = None
+            self._stress_break_fired = False        # reset so next episode can trigger
             if self._warm_tint.active:
                 # start cooldown clock the first frame below threshold
                 if self._stress_below_start is None:
@@ -908,6 +1148,14 @@ class MainWindow(QMainWindow):
             self._warm_tint.hide_tint()
             self._warm_tint_dismissed = True
 
+    def _offer_breathing_break(self):
+        dlg = StressBreakDialog(self)
+        if dlg.exec_() == QDialog.Accepted:
+            self._breathing.start()
+
+    def _on_breathing_done(self):
+        pass  # future: log that user completed a breathing session
+
     def _on_lockin_complete(self):
         self._lock_in.show()
         self._lock_in.raise_()
@@ -916,6 +1164,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._glow.hide_glow()
         self._warm_tint.hide_tint()
+        self._breathing.stop()
         self._confetti.hide_confetti()
         self._lock_in.close()
         self._thread.stop()
