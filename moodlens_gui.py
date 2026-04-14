@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
 )
 
 from dashboard import DashboardWidget, _C
+from stress_predictor import StressPredictor
 from stress_predictor import StressPredictor, FEATURE_INTERVAL_SECS
 
 try:
@@ -1016,6 +1017,8 @@ class MainWindow(QMainWindow):
         self._last_stress     = 0.0
         self._session_start   = time.monotonic()
 
+        self._predictor = StressPredictor(session_start=self._session_start)
+
         # ── Emotion logger (polls active app + records entry) ────────
         self._log_timer = QTimer(self)
         self._log_timer.setInterval(LOG_INTERVAL_SECS * 1000)
@@ -1081,6 +1084,7 @@ class MainWindow(QMainWindow):
             f"padding: 4px 10px; background-color: {_C['surface']};")
 
         self._last_stress = score
+        self._predictor.record_stress(score)
         self._dashboard.update_stress(score)
         self._predictor.record_stress(score)
 
@@ -1171,6 +1175,12 @@ class MainWindow(QMainWindow):
         session_min = (time.monotonic() - self._session_start) / 60.0
         self._dashboard.add_log_entry(
             self._last_emotion, self._last_stress, app, session_min)
+
+        prob, level, level_name = self._predictor.collect_and_predict()
+        s = self._predictor.status
+        trained = "ML" if s["is_trained"] else f"heuristic ({s['training_samples']}/{50} samples)"
+        self._debug_label.setText(
+            f"Stress forecast: {prob:.0%} ({level_name})  [{trained}]")
 
     def _on_glow_hidden(self):
         self._glow_source = None

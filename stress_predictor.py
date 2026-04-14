@@ -41,8 +41,8 @@ FEATURE_INTERVAL_SECS    = 10          # how often to snap a feature vector
 LOOKBACK_WINDOW_SECS     = 5 * 60     # rolling window for stress stats
 PREDICTION_HORIZON_MIN_S = 2 * 60     # predict stress >= this far ahead …
 PREDICTION_HORIZON_MAX_S = 5 * 60     # … up to this far ahead
-MIN_TRAINING_SAMPLES     = 50         # need this many labelled rows to train
-RETRAIN_INTERVAL_SECS    = 5 * 60     # retrain at most every 5 min
+MIN_TRAINING_SAMPLES     = 150        # need this many labelled rows to train
+RETRAIN_INTERVAL_SECS    = 10 * 60   # retrain at most every 10 min
 STRESS_THRESHOLD         = 50.0       # what counts as "stressed"
 MODEL_SAVE_PATH          = pathlib.Path(__file__).parent / ".stress_model.pkl"
 
@@ -346,8 +346,8 @@ class StressPredictor:
         Xs = self._scaler.fit_transform(X)
 
         self._model = GradientBoostingClassifier(
-            n_estimators=80, max_depth=3, learning_rate=0.1,
-            subsample=0.8, min_samples_leaf=5, random_state=42)
+            n_estimators=60, max_depth=2, learning_rate=0.08,
+            subsample=0.75, min_samples_leaf=10, random_state=42)
         self._model.fit(Xs, y)
         self._is_trained = True
         self._last_train_time = time.monotonic()
