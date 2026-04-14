@@ -27,7 +27,7 @@ AU_ANALYZE_EVERY_N_FRAMES = 3
 AU_SMOOTH_ALPHA        = 0.6
 STRESS_THRESHOLD       = 50.0
 STRESS_HOLD_SECS       = 10
-GAZE_AWAY_SECS         = 5
+GAZE_AWAY_SECS         = 60
 BOREDOM_GLOW_MS        = 5000
 LOCKIN_GOAL_SECS       = 10 * 60
 GLOW_DURATION_MS       = 2 * 60 * 1000
@@ -738,25 +738,46 @@ class MainWindow(QMainWindow):
     def _on_gaze(self, looking):
         now = time.monotonic()
 
-        if looking:
-            if self._was_looking and self._gaze_last_time is not None:
-                dt = now - self._gaze_last_time
-                if dt < 1.0:
-                    self._lock_in.add_focus_time(dt)
-                    self._total_focus += dt
-                    self._dashboard.update_focus(self._total_focus)
+        # How much time passed since the last gaze update
+        dt = 0.0
+        if self._gaze_last_time is not None:
+            dt = now - self._gaze_last_time
 
+        # Ignore weird long jumps
+        if dt < 0 or dt > 1.0:
+            dt = 0.0
+
+        if looking:
+            # User is looking at the screen, so count focus time normally
+            if dt > 0:
+                self._lock_in.add_focus_time(dt)
+                self._total_focus += dt
+                self._dashboard.update_focus(self._total_focus)
+
+            # Reset away/distraction state
             if self._gaze_away_start is not None:
                 self._gaze_away_start = None
                 self._boredom_fired = False
                 self._lock_in.set_nudge(False)
+
         else:
+            # Start the "away" timer if this is the first moment away
             if self._gaze_away_start is None:
                 self._gaze_away_start = now
                 self._boredom_fired = False
 
             elapsed = now - self._gaze_away_start
-            if elapsed >= GAZE_AWAY_SECS and not self._boredom_fired:
+
+            # Grace period:
+            # keep counting focus time until the away timer exceeds GAZE_AWAY_SECS
+            if elapsed < GAZE_AWAY_SECS:
+                if dt > 0:
+                    self._lock_in.add_focus_time(dt)
+                    self._total_focus += dt
+                    self._dashboard.update_focus(self._total_focus)
+
+            # Only after the grace period do we treat it as distraction
+            elif not self._boredom_fired:
                 self._glow.show_glow(
                     QColor(220, 50, 50), duration_ms=BOREDOM_GLOW_MS)
                 self._glow_source = "boredom"
