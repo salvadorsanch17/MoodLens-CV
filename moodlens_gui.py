@@ -36,10 +36,10 @@ _SOUND_PATH = str(pathlib.Path(__file__).parent / "stress_alert.mp3")
 
 # ── tunables ─────────────────────────────────────────────────────────────────
 HAND_ON_FACE_THRESHOLD = 0.18      # % of face ROI that looks like skin
-HAND_ON_FACE_BONUS = 18.0          # direct stress boost when detected
+HAND_ON_FACE_BONUS = 10.0          # direct stress boost when detected
 HAND_ON_FACE_HOLD_FRAMES = 4       # helps avoid flicker
-STRESS_SCALE = 1.28                # raises scores a bit easier
-STRESS_BIAS = 8.0                  # nudges scores upward
+STRESS_SCALE = 1.10                # raises scores a bit easier
+STRESS_BIAS = 4.0                  # nudges scores upward
 
 ANALYZE_EVERY_N_FRAMES = 5
 AU_ANALYZE_EVERY_N_FRAMES = 3
