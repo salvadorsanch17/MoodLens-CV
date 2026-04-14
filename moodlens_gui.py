@@ -1122,6 +1122,7 @@ class MainWindow(QMainWindow):
         self._lock_in.show()
 
         # ── State ────────────────────────────────────────────────────────
+        self._stress_threshold  = STRESS_THRESHOLD   # can be nudged up by user feedback
         self._stress_start      = None
         self._glow_source       = None
         self._gaze_away_start   = None
@@ -1203,7 +1204,7 @@ class MainWindow(QMainWindow):
         self._dashboard.update_stress(score)
         self._predictor.record_stress(score)
 
-        if score >= STRESS_THRESHOLD:
+        if score >= self._stress_threshold:
             self._stress_below_start = None          # reset cooldown
             if self._stress_start is None:
                 self._stress_start = now
@@ -1223,6 +1224,7 @@ class MainWindow(QMainWindow):
             self._stress_start = None
             self._stress_break_fired = False        # reset so next episode can trigger
             self._stress_sound_played = False
+            self._stress_threshold = STRESS_THRESHOLD  # restore after episode ends
             if self._warm_tint.active:
                 # start cooldown clock the first frame below threshold
                 if self._stress_below_start is None:
@@ -1311,12 +1313,14 @@ class MainWindow(QMainWindow):
         self._predictor.record_true_positive()
 
     def _on_false_positive(self):
-        """User said they weren't stressed — feed correction into the model."""
+        """User said they weren't stressed — raise threshold and restart episode timer."""
         self._predictor.record_false_positive()
         self._warm_tint.hide_tint()
-        self._warm_tint_dismissed = True
+        self._warm_tint_dismissed = False
+        self._stress_threshold = min(self._stress_threshold + 5, 90)
         self._stress_start = None
         self._stress_sound_played = False
+        print(f"[Stress] Threshold raised to {self._stress_threshold}")
 
     def _on_feedback_dismissed(self):
         """User dismissed the banner without giving feedback."""
