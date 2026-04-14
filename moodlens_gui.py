@@ -35,10 +35,10 @@ except ImportError:
 _SOUND_PATH = str(pathlib.Path(__file__).parent / "stress_alert.mp3")
 
 # ── tunables ─────────────────────────────────────────────────────────────────
-HAND_ON_FACE_THRESHOLD = 0.18      # % of face ROI that looks like skin
+HAND_ON_FACE_THRESHOLD = 0.14      # fraction of hand landmarks inside face bbox (3/21)
 HAND_ON_FACE_BONUS = 14.0          # direct stress boost when detected
 HAND_ON_FACE_HOLD_FRAMES = 4       # helps avoid flicker
-STRESS_SCALE = 1.05                # raises scores a bit easier
+STRESS_SCALE = 1.2                # raises scores a bit easier
 STRESS_BIAS = 4.0                  # nudges scores upward
 
 ANALYZE_EVERY_N_FRAMES = 5
@@ -166,78 +166,48 @@ def _clamp(v, lo, hi):
     return max(lo, min(v, hi))
 
 
-def detect_hand_on_face(frame_bgr, landmarks):
+def detect_hand_on_face(frame_bgr, face_landmarks, hand_results):
     """
-    Heuristic hand-on-face detector:
-    looks for skin-colored pixels in cheek/chin/forehead regions
-    around the detected face.
+    Hand-on-face detector using MediaPipe hand landmarks.
+    Checks whether any detected hand has landmarks that fall inside
+    (or close to) the face bounding box.
+
+    hand_results: output of mp.solutions.hands.Hands.process()
+    Returns (detected: bool, confidence: float 0-1)
     """
+    if hand_results is None or not hand_results.multi_hand_landmarks:
+        return False, 0.0
+
     h, w = frame_bgr.shape[:2]
 
-    xs = [lm.x * w for lm in landmarks]
-    ys = [lm.y * h for lm in landmarks]
-
-    x1 = int(max(0, min(xs)))
-    y1 = int(max(0, min(ys)))
-    x2 = int(min(w - 1, max(xs)))
-    y2 = int(min(h - 1, max(ys)))
-
-    face_w = x2 - x1
-    face_h = y2 - y1
+    # Build the face bounding box and expand it slightly so fingers
+    # resting near the chin/forehead are still caught.
+    xs = [lm.x * w for lm in face_landmarks]
+    ys = [lm.y * h for lm in face_landmarks]
+    face_w = max(xs) - min(xs)
+    face_h = max(ys) - min(ys)
     if face_w < 40 or face_h < 40:
         return False, 0.0
 
-    # ROIs where a hand commonly rests during stress/tiredness:
-    # left cheek, right cheek, chin/jaw, forehead
-    rois = []
+    pad_x = face_w * 0.18
+    pad_y = face_h * 0.18
+    fx1 = max(0,     min(xs) - pad_x)
+    fy1 = max(0,     min(ys) - pad_y)
+    fx2 = min(w - 1, max(xs) + pad_x)
+    fy2 = min(h - 1, max(ys) + pad_y)
 
-    rois.append(frame_bgr[
-        y1 + int(face_h * 0.28): y1 + int(face_h * 0.72),
-        x1: x1 + int(face_w * 0.22)
-    ])  # left cheek
+    best_ratio = 0.0
+    for hand_lms in hand_results.multi_hand_landmarks:
+        hits = sum(
+            1 for lm in hand_lms.landmark
+            if fx1 <= lm.x * w <= fx2 and fy1 <= lm.y * h <= fy2
+        )
+        ratio = hits / len(hand_lms.landmark)   # 21 landmarks total
+        if ratio > best_ratio:
+            best_ratio = ratio
 
-    rois.append(frame_bgr[
-        y1 + int(face_h * 0.28): y1 + int(face_h * 0.72),
-        x2 - int(face_w * 0.22): x2
-    ])  # right cheek
-
-    rois.append(frame_bgr[
-        y2 - int(face_h * 0.20): min(h, y2 + int(face_h * 0.12)),
-        x1 + int(face_w * 0.20): x2 - int(face_w * 0.20)
-    ])  # chin / jaw support
-
-    rois.append(frame_bgr[
-        max(0, y1 - int(face_h * 0.10)): y1 + int(face_h * 0.18),
-        x1 + int(face_w * 0.18): x2 - int(face_w * 0.18)
-    ])  # forehead
-
-    total_skin_ratio = 0.0
-    valid = 0
-
-    for roi in rois:
-        if roi.size == 0:
-            continue
-
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-
-        # broad skin range, not perfect but decent for a heuristic
-        lower1 = np.array([0, 25, 40], dtype=np.uint8)
-        upper1 = np.array([25, 180, 255], dtype=np.uint8)
-
-        mask = cv2.inRange(hsv, lower1, upper1)
-
-        # smooth noise
-        mask = cv2.medianBlur(mask, 5)
-
-        skin_ratio = float(np.count_nonzero(mask)) / float(mask.size)
-        total_skin_ratio += skin_ratio
-        valid += 1
-
-    if valid == 0:
-        return False, 0.0
-
-    avg_skin_ratio = total_skin_ratio / valid
-    return avg_skin_ratio >= HAND_ON_FACE_THRESHOLD, avg_skin_ratio
+    # Require at least 3 landmarks inside the face region (~14 % of 21)
+    return best_ratio >= HAND_ON_FACE_THRESHOLD, best_ratio
 
 def is_looking_at_screen(landmarks) -> bool:
     nose = landmarks[1]
@@ -275,9 +245,16 @@ class EmotionThread(QThread):
             return
 
         landmarker = _create_face_landmarker()
+        hand_detector = mp.solutions.hands.Hands(
+            static_image_mode=False,
+            max_num_hands=2,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
         timestamp_ms = 0
         frame_count = 0
         smooth_aus = None
+        last_hand_results = None
 
         while self._running:
             ret, frame = cap.read()
@@ -304,6 +281,10 @@ class EmotionThread(QThread):
 
             if frame_count % AU_ANALYZE_EVERY_N_FRAMES == 0:
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                # Run hand detection on the same RGB frame
+                last_hand_results = hand_detector.process(rgb)
+
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
                 mp_result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
@@ -320,7 +301,8 @@ class EmotionThread(QThread):
                                 prev = smooth_aus.get(au, raw[au])
                                 smooth_aus[au] = (AU_SMOOTH_ALPHA * prev
                                                   + (1 - AU_SMOOTH_ALPHA) * raw[au])
-                        hand_on_face, hand_ratio = detect_hand_on_face(frame, lms)
+                        hand_on_face, hand_ratio = detect_hand_on_face(
+                            frame, lms, last_hand_results)
 
                         if hand_on_face:
                             self._hand_face_hits += 1
@@ -340,6 +322,7 @@ class EmotionThread(QThread):
                     self.gaze_status.emit(False)
 
         landmarker.close()
+        hand_detector.close()
         cap.release()
 
     def stop(self):
