@@ -10,6 +10,7 @@ import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 from deepface import DeepFace
+from collections import deque
 
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl
 from PyQt5.QtGui import (
@@ -23,7 +24,6 @@ from PyQt5.QtWidgets import (
 )
 
 from dashboard import DashboardWidget, _C
-from stress_predictor import StressPredictor
 from stress_predictor import StressPredictor, FEATURE_INTERVAL_SECS
 
 try:
@@ -35,10 +35,16 @@ except ImportError:
 _SOUND_PATH = str(pathlib.Path(__file__).parent / "stress_alert.mp3")
 
 # ── tunables ─────────────────────────────────────────────────────────────────
+HAND_ON_FACE_THRESHOLD = 0.18      # % of face ROI that looks like skin
+HAND_ON_FACE_BONUS = 18.0          # direct stress boost when detected
+HAND_ON_FACE_HOLD_FRAMES = 4       # helps avoid flicker
+STRESS_SCALE = 1.28                # raises scores a bit easier
+STRESS_BIAS = 8.0                  # nudges scores upward
+
 ANALYZE_EVERY_N_FRAMES = 5
 AU_ANALYZE_EVERY_N_FRAMES = 3
 AU_SMOOTH_ALPHA        = 0.4
-STRESS_THRESHOLD       = 47.0
+STRESS_THRESHOLD       = 50.0
 STRESS_HOLD_SECS       = 10
 STRESS_COOLDOWN_SECS   = 60            # stay warm until below threshold this long
 STRESS_BREAK_SECS      = 15 * 60       # prompt a break after this much consecutive stress
@@ -130,11 +136,98 @@ def compute_aus_from_landmarks(landmarks, img_w, img_h):
     return aus
 
 
-def compute_stress_score(au_row):
-    raw = sum(w * np.clip(float(au_row.get(au, 0)) / 5, 0, 1)
-              for au, w in AU_STRESS_WEIGHTS.items())
-    return float(np.clip((raw + _NEG_SUM) / (_POS_SUM + _NEG_SUM) * 100, 0, 100))
+def compute_stress_score(au_row, hand_on_face=False):
+    raw = sum(
+        w * np.clip(float(au_row.get(au, 0)) / 5, 0, 1)
+        for au, w in AU_STRESS_WEIGHTS.items()
+    )
 
+    base_score = (raw + _NEG_SUM) / (_POS_SUM + _NEG_SUM) * 100.0
+
+    # make moderate stress climb faster
+    boosted = base_score * STRESS_SCALE + STRESS_BIAS
+
+    if hand_on_face:
+        boosted += HAND_ON_FACE_BONUS
+
+    return float(np.clip(boosted, 0, 100))
+
+def _clamp(v, lo, hi):
+    return max(lo, min(v, hi))
+
+
+def detect_hand_on_face(frame_bgr, landmarks):
+    """
+    Heuristic hand-on-face detector:
+    looks for skin-colored pixels in cheek/chin/forehead regions
+    around the detected face.
+    """
+    h, w = frame_bgr.shape[:2]
+
+    xs = [lm.x * w for lm in landmarks]
+    ys = [lm.y * h for lm in landmarks]
+
+    x1 = int(max(0, min(xs)))
+    y1 = int(max(0, min(ys)))
+    x2 = int(min(w - 1, max(xs)))
+    y2 = int(min(h - 1, max(ys)))
+
+    face_w = x2 - x1
+    face_h = y2 - y1
+    if face_w < 40 or face_h < 40:
+        return False, 0.0
+
+    # ROIs where a hand commonly rests during stress/tiredness:
+    # left cheek, right cheek, chin/jaw, forehead
+    rois = []
+
+    rois.append(frame_bgr[
+        y1 + int(face_h * 0.28): y1 + int(face_h * 0.72),
+        x1: x1 + int(face_w * 0.22)
+    ])  # left cheek
+
+    rois.append(frame_bgr[
+        y1 + int(face_h * 0.28): y1 + int(face_h * 0.72),
+        x2 - int(face_w * 0.22): x2
+    ])  # right cheek
+
+    rois.append(frame_bgr[
+        y2 - int(face_h * 0.20): min(h, y2 + int(face_h * 0.12)),
+        x1 + int(face_w * 0.20): x2 - int(face_w * 0.20)
+    ])  # chin / jaw support
+
+    rois.append(frame_bgr[
+        max(0, y1 - int(face_h * 0.10)): y1 + int(face_h * 0.18),
+        x1 + int(face_w * 0.18): x2 - int(face_w * 0.18)
+    ])  # forehead
+
+    total_skin_ratio = 0.0
+    valid = 0
+
+    for roi in rois:
+        if roi.size == 0:
+            continue
+
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+        # broad skin range, not perfect but decent for a heuristic
+        lower1 = np.array([0, 25, 40], dtype=np.uint8)
+        upper1 = np.array([25, 180, 255], dtype=np.uint8)
+
+        mask = cv2.inRange(hsv, lower1, upper1)
+
+        # smooth noise
+        mask = cv2.medianBlur(mask, 5)
+
+        skin_ratio = float(np.count_nonzero(mask)) / float(mask.size)
+        total_skin_ratio += skin_ratio
+        valid += 1
+
+    if valid == 0:
+        return False, 0.0
+
+    avg_skin_ratio = total_skin_ratio / valid
+    return avg_skin_ratio >= HAND_ON_FACE_THRESHOLD, avg_skin_ratio
 
 def is_looking_at_screen(landmarks) -> bool:
     nose = landmarks[1]
@@ -163,6 +256,7 @@ class EmotionThread(QThread):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._running = True
+        self._hand_face_hits = 0
 
     def run(self):
         cap = cv2.VideoCapture(0)
@@ -216,8 +310,22 @@ class EmotionThread(QThread):
                                 prev = smooth_aus.get(au, raw[au])
                                 smooth_aus[au] = (AU_SMOOTH_ALPHA * prev
                                                   + (1 - AU_SMOOTH_ALPHA) * raw[au])
-                        score = compute_stress_score(smooth_aus)
-                        self.stress_found.emit(score, dict(smooth_aus))
+                        hand_on_face, hand_ratio = detect_hand_on_face(frame, lms)
+
+                        if hand_on_face:
+                            self._hand_face_hits += 1
+                        else:
+                            self._hand_face_hits = max(0, self._hand_face_hits - 1)
+
+                        stable_hand_on_face = self._hand_face_hits >= HAND_ON_FACE_HOLD_FRAMES
+
+                        score = compute_stress_score(smooth_aus, hand_on_face=stable_hand_on_face)
+
+                        payload = dict(smooth_aus)
+                        payload["HAND_FACE"] = 5.0 if stable_hand_on_face else 0.0
+                        payload["HAND_FACE_RAW"] = hand_ratio
+
+                        self.stress_found.emit(score, payload)
                 else:
                     self.gaze_status.emit(False)
 
@@ -730,7 +838,7 @@ class LockInWidget(QWidget):
             | Qt.Window | Qt.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setFixedSize(210, 90)
+        self.setFixedSize(210, 86)
         screen = QApplication.primaryScreen().geometry()
         self.move(screen.right() - self.width() - 18, screen.top() + 18)
 
@@ -738,26 +846,10 @@ class LockInWidget(QWidget):
         lay.setContentsMargins(12, 8, 12, 8)
         lay.setSpacing(4)
 
-        header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(0)
-
         self._title = QLabel("Lock In! Focus for 10 min")
         self._title.setStyleSheet(self._TITLE_NORMAL)
         self._title.setAlignment(Qt.AlignCenter)
-        header.addWidget(self._title, stretch=1)
-
-        self._close_btn = QPushButton("×")
-        self._close_btn.setFixedSize(16, 16)
-        self._close_btn.setStyleSheet(
-            "QPushButton { color: #666; background: transparent; border: none;"
-            " font-size: 14px; font-weight: bold; padding: 0; }"
-            "QPushButton:hover { color: #ccc; }")
-        self._close_btn.setCursor(Qt.PointingHandCursor)
-        self._close_btn.clicked.connect(self.hide)
-        header.addWidget(self._close_btn)
-
-        lay.addLayout(header)
+        lay.addWidget(self._title)
 
         self._bar = QProgressBar()
         self._bar.setRange(0, 1000)
@@ -1014,10 +1106,10 @@ class MainWindow(QMainWindow):
         if _HAS_MEDIA:
             self._player = QMediaPlayer(self)
             self._player.setVolume(70)
-            self._dashboard._sound_btn.toggled.connect(self._on_sound_toggle)
 
         self._lock_in = LockInWidget()
         self._lock_in.completed.connect(self._on_lockin_complete)
+        self._lock_in.show()
 
         # ── State ────────────────────────────────────────────────────────
         self._stress_start      = None
@@ -1028,13 +1120,10 @@ class MainWindow(QMainWindow):
         self._gaze_last_time    = None
         self._total_focus       = 0.0   # tracked for dashboard
         self._stress_break_fired = False  # only prompt once per sustained episode
-        self._stress_sound_played = False  # only play sound once per stress episode
 
         self._last_emotion    = "neutral"
         self._last_stress     = 0.0
         self._session_start   = time.monotonic()
-
-        self._predictor = StressPredictor(session_start=self._session_start)
 
         # ── Emotion logger (polls active app + records entry) ────────
         self._log_timer = QTimer(self)
@@ -1101,7 +1190,6 @@ class MainWindow(QMainWindow):
             f"padding: 4px 10px; background-color: {_C['surface']};")
 
         self._last_stress = score
-        self._predictor.record_stress(score)
         self._dashboard.update_stress(score)
         self._predictor.record_stress(score)
 
@@ -1110,12 +1198,9 @@ class MainWindow(QMainWindow):
             if self._stress_start is None:
                 self._stress_start = now
             elif (now - self._stress_start) >= STRESS_HOLD_SECS:
-                if not self._warm_tint_dismissed:
-                    if not self._warm_tint.active:
-                        self._warm_tint.show_tint()
-                    if not self._stress_sound_played:
-                        self._play_stress_sound()
-                        self._stress_sound_played = True
+                if not self._warm_tint_dismissed and not self._warm_tint.active:
+                    self._warm_tint.show_tint()
+                    self._play_stress_sound()
                 # 15-min break prompt
                 if (not self._stress_break_fired
                         and (now - self._stress_start) >= STRESS_BREAK_SECS):
@@ -1124,7 +1209,6 @@ class MainWindow(QMainWindow):
         else:
             self._stress_start = None
             self._stress_break_fired = False        # reset so next episode can trigger
-            self._stress_sound_played = False
             if self._warm_tint.active:
                 # start cooldown clock the first frame below threshold
                 if self._stress_below_start is None:
@@ -1197,12 +1281,6 @@ class MainWindow(QMainWindow):
         self._dashboard.add_log_entry(
             self._last_emotion, self._last_stress, app, session_min)
 
-        prob, level, level_name = self._predictor.collect_and_predict()
-        s = self._predictor.status
-        trained = "ML" if s["is_trained"] else f"heuristic ({s['training_samples']}/{50} samples)"
-        self._debug_label.setText(
-            f"Stress forecast: {prob:.0%} ({level_name})  [{trained}]")
-
     def _on_glow_hidden(self):
         self._glow_source = None
 
@@ -1213,10 +1291,6 @@ class MainWindow(QMainWindow):
         if self._warm_tint.active:
             self._warm_tint.hide_tint()
             self._warm_tint_dismissed = True
-
-    def _on_sound_toggle(self, checked):
-        if not checked and self._player is not None:
-            self._player.stop()
 
     def _play_stress_sound(self):
         """Play the stress alert sound if the dashboard toggle is ON."""
