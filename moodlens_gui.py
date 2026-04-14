@@ -730,7 +730,7 @@ class LockInWidget(QWidget):
             | Qt.Window | Qt.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setFixedSize(210, 86)
+        self.setFixedSize(210, 90)
         screen = QApplication.primaryScreen().geometry()
         self.move(screen.right() - self.width() - 18, screen.top() + 18)
 
@@ -738,10 +738,26 @@ class LockInWidget(QWidget):
         lay.setContentsMargins(12, 8, 12, 8)
         lay.setSpacing(4)
 
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(0)
+
         self._title = QLabel("Lock In! Focus for 10 min")
         self._title.setStyleSheet(self._TITLE_NORMAL)
         self._title.setAlignment(Qt.AlignCenter)
-        lay.addWidget(self._title)
+        header.addWidget(self._title, stretch=1)
+
+        self._close_btn = QPushButton("×")
+        self._close_btn.setFixedSize(16, 16)
+        self._close_btn.setStyleSheet(
+            "QPushButton { color: #666; background: transparent; border: none;"
+            " font-size: 14px; font-weight: bold; padding: 0; }"
+            "QPushButton:hover { color: #ccc; }")
+        self._close_btn.setCursor(Qt.PointingHandCursor)
+        self._close_btn.clicked.connect(self.hide)
+        header.addWidget(self._close_btn)
+
+        lay.addLayout(header)
 
         self._bar = QProgressBar()
         self._bar.setRange(0, 1000)
@@ -1001,7 +1017,6 @@ class MainWindow(QMainWindow):
 
         self._lock_in = LockInWidget()
         self._lock_in.completed.connect(self._on_lockin_complete)
-        self._lock_in.show()
 
         # ── State ────────────────────────────────────────────────────────
         self._stress_start      = None
