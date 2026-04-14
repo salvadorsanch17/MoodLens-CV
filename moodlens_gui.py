@@ -1113,6 +1113,7 @@ class MainWindow(QMainWindow):
             self._dashboard._sound_selector.currentIndexChanged.connect(self._on_sound_changed)
 
         # ── Stress feedback banner ─────────────────────────────────────────
+        self._dashboard.true_positive_clicked.connect(self._on_true_positive)
         self._dashboard.false_positive_clicked.connect(self._on_false_positive)
         self._dashboard.feedback_dismissed.connect(self._on_feedback_dismissed)
 
@@ -1304,6 +1305,10 @@ class MainWindow(QMainWindow):
         if self._warm_tint.active:
             self._warm_tint.hide_tint()
             self._warm_tint_dismissed = True
+
+    def _on_true_positive(self):
+        """User confirmed they were stressed — reinforce the model."""
+        self._predictor.record_true_positive()
 
     def _on_false_positive(self):
         """User said they weren't stressed — feed correction into the model."""

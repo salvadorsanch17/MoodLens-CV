@@ -94,8 +94,9 @@ class BarChartWidget(QWidget):
 
 class DashboardWidget(QWidget):
 
-    false_positive_clicked = pyqtSignal()
-    feedback_dismissed     = pyqtSignal()
+    false_positive_clicked  = pyqtSignal()
+    true_positive_clicked   = pyqtSignal()
+    feedback_dismissed      = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -192,6 +193,18 @@ class DashboardWidget(QWidget):
             "color: #e8c88a; font-size: 12px; font-family: 'Inter';"
             " background: transparent;")
         row.addWidget(msg, stretch=1)
+
+        yes_btn = QPushButton("Yes, stressed")
+        yes_btn.setCursor(Qt.PointingHandCursor)
+        yes_btn.setStyleSheet(
+            "QPushButton { background: #0e2a1f; color: #4caf50;"
+            " border: 1px solid #1e6b4c; border-radius: 6px;"
+            " padding: 4px 14px; font-size: 11px; font-weight: 600;"
+            " font-family: 'Inter'; }"
+            "QPushButton:hover { background: #12402e; }")
+        yes_btn.clicked.connect(self.true_positive_clicked)
+        yes_btn.clicked.connect(banner.hide)
+        row.addWidget(yes_btn)
 
         not_stressed_btn = QPushButton("Not stressed")
         not_stressed_btn.setCursor(Qt.PointingHandCursor)

@@ -431,6 +431,28 @@ class StressPredictor:
             self._last_train_time = 0.0
             self._train()
 
+    def record_true_positive(self):
+        """User confirmed they were stressed.
+        Injects the current feature snapshot (×5) plus recent unlabeled
+        snapshots as positive samples, then retrains if ready."""
+        features = self._extract_features()
+        for _ in range(5):
+            self._X.append(features.copy())
+            self._y.append(1)
+
+        now = time.monotonic()
+        for ts, feat in list(self._unlabeled):
+            if now - ts <= 120:
+                self._X.append(feat.copy())
+                self._y.append(1)
+
+        print(f"[StressPredictor] True positive recorded. "
+              f"Total samples: {len(self._X)}")
+
+        if len(self._X) >= MIN_TRAINING_SAMPLES:
+            self._last_train_time = 0.0
+            self._train()
+
     # ── Shutdown ─────────────────────────────────────────────────────────
 
     def stop(self):
