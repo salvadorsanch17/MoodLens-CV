@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
 )
 
 from dashboard import DashboardWidget, _C
+from stress_predictor import StressPredictor, FEATURE_INTERVAL_SECS
 
 try:
     from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
@@ -351,11 +352,18 @@ class WarmTintOverlay(QWidget):
     def active(self):
         return self._active
 
-    def show_tint(self):
+    def show_tint(self, alpha_override=None):
+        """Show the tint.  *alpha_override* (0-255) lets callers request
+        a lighter or heavier tint than the default MAX_ALPHA."""
+        target = alpha_override if alpha_override is not None else self.MAX_ALPHA
         if self._active:
+            # just adjust intensity if already showing
+            if target != self._target_alpha:
+                self._target_alpha = target
+                self._fade_timer.start()
             return
         self._active = True
-        self._target_alpha = self.MAX_ALPHA
+        self._target_alpha = target
         self.show()
         self.raise_()
         self._fade_timer.start()
@@ -1023,6 +1031,17 @@ class MainWindow(QMainWindow):
         self._thread.log_message.connect(self._on_log)
         self._thread.start()
 
+        # ── Predictive stress model ─────────────────────────────────────
+        self._predictor = StressPredictor(
+            session_start=self._session_start)
+        self._pred_level = 0              # current intervention level
+        self._pred_tint_active = False    # is the *predictive* tint showing?
+
+        self._pred_timer = QTimer(self)
+        self._pred_timer.setInterval(FEATURE_INTERVAL_SECS * 1000)
+        self._pred_timer.timeout.connect(self._on_prediction_tick)
+        self._pred_timer.start()
+
     # ── callbacks ────────────────────────────────────────────────────────
 
     def _test_glow(self):
@@ -1063,6 +1082,7 @@ class MainWindow(QMainWindow):
 
         self._last_stress = score
         self._dashboard.update_stress(score)
+        self._predictor.record_stress(score)
 
         if score >= STRESS_THRESHOLD:
             self._stress_below_start = None          # reset cooldown
@@ -1180,6 +1200,50 @@ class MainWindow(QMainWindow):
     def _on_breathing_done(self):
         pass  # future: log that user completed a breathing session
 
+    # ── Predictive interventions ──────────────────────────────────────
+
+    # Alpha values for each prediction level
+    _PRED_ALPHA = {0: 0, 1: 12, 2: 22, 3: 30}
+
+    def _on_prediction_tick(self):
+        """Called every FEATURE_INTERVAL_SECS to run the predictor."""
+        prob, level, name = self._predictor.collect_and_predict()
+
+        # Don't override a real stress tint or a user-dismissed tint
+        if self._warm_tint.active and not self._pred_tint_active:
+            return
+        if self._warm_tint_dismissed:
+            return
+
+        prev_level = self._pred_level
+        self._pred_level = level
+
+        if level == 0:
+            # No predicted stress — hide predictive tint if it was active
+            if self._pred_tint_active:
+                self._warm_tint.hide_tint()
+                self._pred_tint_active = False
+            return
+
+        alpha = self._PRED_ALPHA.get(level, 0)
+
+        if not self._pred_tint_active:
+            self._warm_tint.show_tint(alpha_override=alpha)
+            self._pred_tint_active = True
+        else:
+            # Adjust intensity if level changed
+            if level != prev_level:
+                self._warm_tint.show_tint(alpha_override=alpha)
+
+        # Level 3: also offer a preemptive break
+        if level >= 3 and prev_level < 3:
+            self._offer_breathing_break()
+
+        status = self._predictor.status
+        model_tag = "ML" if status["is_trained"] else "heuristic"
+        print(f"[Predict] prob={prob:.2f}  level={level} ({name})  "
+              f"model={model_tag}  samples={status['training_samples']}")
+
     def _on_lockin_complete(self):
         self._lock_in.show()
         self._lock_in.raise_()
@@ -1191,6 +1255,7 @@ class MainWindow(QMainWindow):
         self._breathing.stop()
         self._confetti.hide_confetti()
         self._lock_in.close()
+        self._predictor.stop()
         self._thread.stop()
         super().closeEvent(event)
 
