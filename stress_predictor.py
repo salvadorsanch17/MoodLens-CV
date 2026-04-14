@@ -406,6 +406,31 @@ class StressPredictor:
         self._mouse_listener.daemon = True
         self._mouse_listener.start()
 
+    # ── User feedback ────────────────────────────────────────────────────
+
+    def record_false_positive(self):
+        """User said the last stress alert was wrong.
+        Injects the current feature snapshot (×5 for weight) plus any
+        unlabeled snapshots from the past 2 minutes as negative samples,
+        then forces an immediate retrain if enough data exists."""
+        features = self._extract_features()
+        for _ in range(5):
+            self._X.append(features.copy())
+            self._y.append(0)
+
+        now = time.monotonic()
+        for ts, feat in list(self._unlabeled):
+            if now - ts <= 120:
+                self._X.append(feat.copy())
+                self._y.append(0)
+
+        print(f"[StressPredictor] False positive recorded. "
+              f"Total samples: {len(self._X)}")
+
+        if len(self._X) >= MIN_TRAINING_SAMPLES:
+            self._last_train_time = 0.0
+            self._train()
+
     # ── Shutdown ─────────────────────────────────────────────────────────
 
     def stop(self):

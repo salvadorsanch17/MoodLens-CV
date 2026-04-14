@@ -5,7 +5,7 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QFont
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
-    QScrollArea, QGridLayout, QSizePolicy,
+    QScrollArea, QGridLayout, QSizePolicy, QPushButton,
 )
 
 # ── design tokens (from The Sentient Interface) ──────────────────────────────
@@ -94,6 +94,9 @@ class BarChartWidget(QWidget):
 
 class DashboardWidget(QWidget):
 
+    false_positive_clicked = pyqtSignal()
+    feedback_dismissed     = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet(f"background: {_C['bg']};")
@@ -112,6 +115,12 @@ class DashboardWidget(QWidget):
         # ── build ────────────────────────────────────────────────────────
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Feedback banner (hidden until a stress alert fires)
+        self._feedback_banner = self._build_feedback_banner()
+        self._feedback_banner.hide()
+        outer.addWidget(self._feedback_banner)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -161,6 +170,60 @@ class DashboardWidget(QWidget):
             f"font-family: '{family}'; background: transparent; {extra}")
         return l
 
+    # ── stress feedback banner ────────────────────────────────────────────
+
+    def _build_feedback_banner(self) -> QWidget:
+        banner = QWidget()
+        banner.setAttribute(Qt.WA_StyledBackground, True)
+        banner.setStyleSheet(
+            "background: #2a1f0e; border-bottom: 1px solid #6b4c1e;")
+
+        row = QHBoxLayout(banner)
+        row.setContentsMargins(20, 10, 12, 10)
+        row.setSpacing(12)
+
+        icon = QLabel("⚠")
+        icon.setStyleSheet(
+            "color: #f0a030; font-size: 15px; background: transparent;")
+        row.addWidget(icon)
+
+        msg = QLabel("Stress was detected — were you actually stressed?")
+        msg.setStyleSheet(
+            "color: #e8c88a; font-size: 12px; font-family: 'Inter';"
+            " background: transparent;")
+        row.addWidget(msg, stretch=1)
+
+        not_stressed_btn = QPushButton("Not stressed")
+        not_stressed_btn.setCursor(Qt.PointingHandCursor)
+        not_stressed_btn.setStyleSheet(
+            "QPushButton { background: #3d2a0a; color: #f0a030;"
+            " border: 1px solid #6b4c1e; border-radius: 6px;"
+            " padding: 4px 14px; font-size: 11px; font-weight: 600;"
+            " font-family: 'Inter'; }"
+            "QPushButton:hover { background: #5a3e12; }")
+        not_stressed_btn.clicked.connect(self.false_positive_clicked)
+        not_stressed_btn.clicked.connect(banner.hide)
+        row.addWidget(not_stressed_btn)
+
+        dismiss_btn = QPushButton("×")
+        dismiss_btn.setFixedSize(24, 24)
+        dismiss_btn.setCursor(Qt.PointingHandCursor)
+        dismiss_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #888;"
+            " border: none; font-size: 16px; font-weight: bold; }"
+            "QPushButton:hover { color: #ccc; }")
+        dismiss_btn.clicked.connect(self.feedback_dismissed)
+        dismiss_btn.clicked.connect(banner.hide)
+        row.addWidget(dismiss_btn)
+
+        return banner
+
+    def show_stress_banner(self):
+        self._feedback_banner.show()
+
+    def hide_stress_banner(self):
+        self._feedback_banner.hide()
+
     # ── header ────────────────────────────────────────────────────────────
 
     def _build_header(self):
@@ -177,7 +240,6 @@ class DashboardWidget(QWidget):
         snd_icon.setStyleSheet("background: transparent;")
         row.addWidget(snd_icon)
 
-        from PyQt5.QtWidgets import QPushButton
         self._sound_btn = QPushButton("Sound: OFF")
         self._sound_btn.setCheckable(True)
         self._sound_btn.setChecked(False)

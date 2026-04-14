@@ -1106,6 +1106,11 @@ class MainWindow(QMainWindow):
         if _HAS_MEDIA:
             self._player = QMediaPlayer(self)
             self._player.setVolume(70)
+            self._dashboard._sound_btn.toggled.connect(self._on_sound_toggle)
+
+        # ── Stress feedback banner ─────────────────────────────────────────
+        self._dashboard.false_positive_clicked.connect(self._on_false_positive)
+        self._dashboard.feedback_dismissed.connect(self._on_feedback_dismissed)
 
         self._lock_in = LockInWidget()
         self._lock_in.completed.connect(self._on_lockin_complete)
@@ -1201,6 +1206,7 @@ class MainWindow(QMainWindow):
                 if not self._warm_tint_dismissed and not self._warm_tint.active:
                     self._warm_tint.show_tint()
                     self._play_stress_sound()
+                    self._dashboard.show_stress_banner()
                 # 15-min break prompt
                 if (not self._stress_break_fired
                         and (now - self._stress_start) >= STRESS_BREAK_SECS):
@@ -1209,6 +1215,7 @@ class MainWindow(QMainWindow):
         else:
             self._stress_start = None
             self._stress_break_fired = False        # reset so next episode can trigger
+            self._stress_sound_played = False
             if self._warm_tint.active:
                 # start cooldown clock the first frame below threshold
                 if self._stress_below_start is None:
@@ -1292,6 +1299,23 @@ class MainWindow(QMainWindow):
             self._warm_tint.hide_tint()
             self._warm_tint_dismissed = True
 
+    def _on_false_positive(self):
+        """User said they weren't stressed — feed correction into the model."""
+        self._predictor.record_false_positive()
+        self._warm_tint.hide_tint()
+        self._warm_tint_dismissed = True
+        self._stress_start = None
+        self._stress_sound_played = False
+
+    def _on_feedback_dismissed(self):
+        """User dismissed the banner without giving feedback."""
+        self._warm_tint.hide_tint()
+        self._warm_tint_dismissed = True
+
+    def _on_sound_toggle(self, checked):
+        if not checked and self._player is not None:
+            self._player.stop()
+
     def _play_stress_sound(self):
         """Play the stress alert sound if the dashboard toggle is ON."""
         if (self._player is not None
@@ -1339,6 +1363,7 @@ class MainWindow(QMainWindow):
         if not self._pred_tint_active:
             self._warm_tint.show_tint(alpha_override=alpha)
             self._pred_tint_active = True
+            self._dashboard.show_stress_banner()
         else:
             # Adjust intensity if level changed
             if level != prev_level:
