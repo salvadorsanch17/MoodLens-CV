@@ -35,9 +35,9 @@ except ImportError:
 _SOUND_PATH = str(pathlib.Path(__file__).parent / "stress_alert.mp3")
 
 # ── tunables ─────────────────────────────────────────────────────────────────
-ANALYZE_EVERY_N_FRAMES = 8
+ANALYZE_EVERY_N_FRAMES = 5
 AU_ANALYZE_EVERY_N_FRAMES = 3
-AU_SMOOTH_ALPHA        = 0.6
+AU_SMOOTH_ALPHA        = 0.4
 STRESS_THRESHOLD       = 47.0
 STRESS_HOLD_SECS       = 10
 STRESS_COOLDOWN_SECS   = 60            # stay warm until below threshold this long
