@@ -20,14 +20,15 @@ from PyQt5.QtGui import (
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QWidget,
     QVBoxLayout, QPushButton, QHBoxLayout, QProgressBar,
-    QTabWidget, QDialog,
+    QTabWidget, QDialog, QShortcut,
 )
+from PyQt5.QtGui import QKeySequence
 
 from dashboard import DashboardWidget, _C
 from stress_predictor import StressPredictor, FEATURE_INTERVAL_SECS
 
 try:
-    from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+    from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent, QMediaPlaylist
     _HAS_MEDIA = True
 except ImportError:
     _HAS_MEDIA = False
@@ -235,6 +236,70 @@ def is_looking_at_screen(landmarks) -> bool:
     return abs(yaw_ratio - 0.5) <= GAZE_YAW_THRESHOLD
 
 
+# ── hand skeleton connections (MediaPipe 21-landmark model) ──────────────────
+_HAND_CONNECTIONS = (
+    # Palm
+    (0, 1), (0, 5), (0, 17), (5, 9), (9, 13), (13, 17),
+    # Thumb
+    (1, 2), (2, 3), (3, 4),
+    # Index
+    (5, 6), (6, 7), (7, 8),
+    # Middle
+    (9, 10), (10, 11), (11, 12),
+    # Ring
+    (13, 14), (14, 15), (15, 16),
+    # Pinky
+    (17, 18), (18, 19), (19, 20),
+)
+
+# ── AU landmark drawing ──────────────────────────────────────────────────────
+# Each entry: (landmark_key_a, landmark_key_b, stress_sign)
+# stress_sign +1 = this measurement raises stress score (draw orange)
+#             -1 = this measurement lowers stress score (draw green, AU12 smile)
+_AU_CONNECTIONS = [
+    ("left_brow_inner",  "left_lid_upper",  +1),  # AU04 brow lowerer (L)
+    ("right_brow_inner", "right_lid_upper", +1),  # AU04 brow lowerer (R)
+    ("left_lid_upper",   "left_lid_lower",  +1),  # AU07 lid tightener (L)
+    ("right_lid_upper",  "right_lid_lower", +1),  # AU07 lid tightener (R)
+    ("mouth_left",       "mouth_right",     -1),  # AU12 smile / AU20 lip stretch
+    ("lip_upper_in",     "lip_lower_in",    +1),  # AU23/24 lip tightener
+]
+
+
+def _draw_au_landmarks(frame: np.ndarray, landmarks) -> None:
+    """Draw AU keypoints and measurement skeletons onto a BGR frame in-place."""
+    h, w = frame.shape[:2]
+
+    def pt(key):
+        lm = landmarks[_LM[key]]
+        return int(lm.x * w), int(lm.y * h)
+
+    # Skeleton lines — orange for stress-raising AUs, green for calming
+    for key_a, key_b, sign in _AU_CONNECTIONS:
+        color = (50, 120, 255) if sign > 0 else (80, 210, 90)
+        cv2.line(frame, pt(key_a), pt(key_b), color, 2, cv2.LINE_AA)
+
+    # Keypoints — white fill so they stand out over any skin tone
+    for key in _LM:
+        x, y = pt(key)
+        cv2.circle(frame, (x, y), 4, (255, 255, 255), -1, cv2.LINE_AA)
+        cv2.circle(frame, (x, y), 4, (140, 140, 140),  1, cv2.LINE_AA)
+
+
+def _draw_hand_landmarks(frame: np.ndarray, all_hand_landmarks) -> None:
+    """Draw hand skeletons and keypoints onto a BGR frame in-place."""
+    h, w = frame.shape[:2]
+    for hand_lms in all_hand_landmarks:
+        for start_idx, end_idx in _HAND_CONNECTIONS:
+            x1, y1 = int(hand_lms[start_idx].x * w), int(hand_lms[start_idx].y * h)
+            x2, y2 = int(hand_lms[end_idx].x * w),   int(hand_lms[end_idx].y * h)
+            cv2.line(frame, (x1, y1), (x2, y2), (171, 71, 0), 2, cv2.LINE_AA)
+        for lm in hand_lms:
+            cx, cy = int(lm.x * w), int(lm.y * h)
+            cv2.circle(frame, (cx, cy), 4, (255, 180, 80), -1, cv2.LINE_AA)
+            cv2.circle(frame, (cx, cy), 4, (171, 71, 0),   1,  cv2.LINE_AA)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  Threads
 # ═══════════════════════════════════════════════════════════════════════════
@@ -250,6 +315,7 @@ class EmotionThread(QThread):
         super().__init__(parent)
         self._running = True
         self._hand_face_hits = 0
+        self.show_overlay = True
 
     def run(self):
         cap = cv2.VideoCapture(0)
@@ -263,6 +329,8 @@ class EmotionThread(QThread):
         frame_count = 0
         smooth_aus = None
         last_hand_results = None
+        last_face_lms = None   # cached for overlay drawing
+        last_hand_lms = []     # cached for overlay drawing
 
         while self._running:
             ret, frame = cap.read()
@@ -271,7 +339,6 @@ class EmotionThread(QThread):
 
             frame_count += 1
             timestamp_ms += 33
-            self.frame_ready.emit(frame.copy())
 
             if frame_count % ANALYZE_EVERY_N_FRAMES == 0:
                 try:
@@ -295,10 +362,12 @@ class EmotionThread(QThread):
                 # Run hand detection if model is available
                 if hand_landmarker is not None:
                     last_hand_results = hand_landmarker.detect_for_video(mp_image, timestamp_ms)
+                    last_hand_lms = last_hand_results.hand_landmarks if last_hand_results else []
                 mp_result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
                 if mp_result.face_landmarks:
                     lms = mp_result.face_landmarks[0]
+                    last_face_lms = lms
                     self.gaze_status.emit(is_looking_at_screen(lms))
                     h, w = frame.shape[:2]
                     raw = compute_aus_from_landmarks(lms, w, h)
@@ -328,7 +397,17 @@ class EmotionThread(QThread):
 
                         self.stress_found.emit(score, payload)
                 else:
+                    last_face_lms = None
                     self.gaze_status.emit(False)
+
+            # Draw AU overlay on every frame using cached landmarks
+            display = frame.copy()
+            if self.show_overlay:
+                if last_face_lms is not None:
+                    _draw_au_landmarks(display, last_face_lms)
+                if last_hand_lms:
+                    _draw_hand_landmarks(display, last_hand_lms)
+            self.frame_ready.emit(display)
 
         landmarker.close()
         if hand_landmarker is not None:
@@ -677,7 +756,7 @@ class BreathingOverlay(QWidget):
 
         # phase label
         p.setPen(QColor(230, 230, 230, 220))
-        font = QFont("Inter", 22)
+        font = QFont("Cabin", 22)
         font.setWeight(QFont.Light)
         p.setFont(font)
         label_rect = self.rect().adjusted(0, int(cy + max_r + 30), 0, 0)
@@ -685,7 +764,7 @@ class BreathingOverlay(QWidget):
 
         # cycle counter
         p.setPen(QColor(180, 180, 180, 150))
-        small = QFont("Inter", 12)
+        small = QFont("Cabin", 12)
         p.setFont(small)
         count_rect = label_rect.adjusted(0, 40, 0, 0)
         p.drawText(count_rect, Qt.AlignHCenter | Qt.AlignTop,
@@ -701,7 +780,7 @@ class StressBreakDialog(QDialog):
         self.setWindowTitle("MoodLens – Take a Break?")
         self.setFixedSize(420, 220)
         self.setStyleSheet(
-            "background: #1a1a2e; color: #e0e0e0; font-family: 'Inter';")
+            "background: #1a1a2e; color: #e0e0e0; font-family: 'Cabin';")
         self.setWindowFlags(
             self.windowFlags() | Qt.WindowStaysOnTopHint)
 
@@ -846,13 +925,24 @@ class LockInWidget(QWidget):
         self.move(screen.right() - self.width() - 18, screen.top() + 18)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setContentsMargins(12, 8, 8, 8)
         lay.setSpacing(4)
 
+        title_row = QHBoxLayout()
+        title_row.setSpacing(4)
         self._title = QLabel("Lock In! Focus for 10 min")
         self._title.setStyleSheet(self._TITLE_NORMAL)
-        self._title.setAlignment(Qt.AlignCenter)
-        lay.addWidget(self._title)
+        title_row.addWidget(self._title, 1)
+
+        close_btn = QPushButton("×")
+        close_btn.setFixedSize(16, 16)
+        close_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #555; border: none;"
+            "font-size: 14px; font-weight: bold; padding: 0; }"
+            "QPushButton:hover { color: #ccc; }")
+        close_btn.clicked.connect(self.dismiss)
+        title_row.addWidget(close_btn)
+        lay.addLayout(title_row)
 
         self._bar = QProgressBar()
         self._bar.setRange(0, 1000)
@@ -965,6 +1055,18 @@ class LockInWidget(QWidget):
                 self.update()
                 self._fade_delay.start(self.FADE_DURATION_MS)
 
+    def dismiss(self):
+        """Hide the widget and reset any active alert state."""
+        self._alert = False
+        self._fading = False
+        self._fade_timer.stop()
+        self._fade_delay.stop()
+        self._title.setText("Lock In! Focus for 10 min")
+        self._title.setStyleSheet(self._TITLE_NORMAL)
+        self._bg_r, self._bg_g, self._bg_b = 15, 15, 15
+        self._bg_alpha = 80
+        self.hide()
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Camera widget
@@ -1002,12 +1104,13 @@ QTabBar {{
 QTabBar::tab {{
     background: {_C['surface']};
     color: {_C['onSurfV']};
-    padding: 10px 28px;
+    padding: 10px 32px;
+    min-width: 120px;
     border: none;
-    font-family: 'Inter';
+    font-family: 'Cabin';
     font-size: 11px;
     font-weight: 600;
-    letter-spacing: 2px;
+    letter-spacing: 1px;
 }}
 QTabBar::tab:selected {{
     color: {_C['primary']};
@@ -1065,25 +1168,27 @@ class MainWindow(QMainWindow):
         self._debug_label.setStyleSheet("color: #aaa; font-size: 12px;")
         bar_layout.addWidget(self._debug_label, stretch=1)
 
-        test_btn = QPushButton("Test Glow")
-        test_btn.setStyleSheet(
-            f"background:{_C['primaryC']}; color:white; border-radius:4px;"
-            "padding: 4px 12px; font-size:12px;")
-        test_btn.clicked.connect(self._test_glow)
-        bar_layout.addWidget(test_btn)
-
-        hide_btn = QPushButton("Hide Glow")
-        hide_btn.setStyleSheet(
-            "background:#444; color:white; border-radius:4px;"
-            "padding: 4px 12px; font-size:12px;")
-        bar_layout.addWidget(hide_btn)
-
         self._warm_btn = QPushButton("Dismiss Warm Tint")
         self._warm_btn.setStyleSheet(
             "background:#8B4513; color:white; border-radius:4px;"
             "padding: 4px 12px; font-size:12px;")
         self._warm_btn.clicked.connect(self._toggle_warm_tint)
         bar_layout.addWidget(self._warm_btn)
+
+        self._overlay_btn = QPushButton("Overlay: ON")
+        self._overlay_btn.setCheckable(True)
+        self._overlay_btn.setChecked(True)
+        self._overlay_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {_C['primaryC']}; color: white;
+                border-radius: 4px; padding: 4px 12px; font-size: 12px;
+            }}
+            QPushButton:!checked {{
+                background: #444; color: #aaa;
+            }}
+        """)
+        self._overlay_btn.toggled.connect(self._on_overlay_toggled)
+        bar_layout.addWidget(self._overlay_btn)
 
         cam_lay.addWidget(bar)
 
@@ -1098,7 +1203,6 @@ class MainWindow(QMainWindow):
         # ── Overlays ─────────────────────────────────────────────────────
         self._glow = GlowOverlay()
         self._glow.glow_hidden.connect(self._on_glow_hidden)
-        hide_btn.clicked.connect(self._glow.hide_glow)
         self._confetti = ConfettiOverlay()
         self._warm_tint = WarmTintOverlay()
         self._warm_tint.tint_hidden.connect(self._on_warm_tint_hidden)
@@ -1109,9 +1213,17 @@ class MainWindow(QMainWindow):
 
         # ── Sound ─────────────────────────────────────────────────────────
         self._player = None
+        self._playlist = None
+        self._sound_target_vol = 70
+        self._fade_vol_timer = QTimer(self)
+        self._fade_vol_timer.setInterval(80)
+        self._fade_vol_timer.timeout.connect(self._fade_vol_tick)
         if _HAS_MEDIA:
+            self._playlist = QMediaPlaylist()
+            self._playlist.setPlaybackMode(QMediaPlaylist.Loop)
             self._player = QMediaPlayer(self)
-            self._player.setVolume(70)
+            self._player.setPlaylist(self._playlist)
+            self._player.setVolume(0)
             self._dashboard._sound_btn.toggled.connect(self._on_sound_toggle)
             self._dashboard._sound_selector.currentIndexChanged.connect(self._on_sound_changed)
 
@@ -1122,7 +1234,6 @@ class MainWindow(QMainWindow):
 
         self._lock_in = LockInWidget()
         self._lock_in.completed.connect(self._on_lockin_complete)
-        self._lock_in.show()
 
         # ── State ────────────────────────────────────────────────────────
         self._stress_threshold  = STRESS_THRESHOLD   # can be nudged up by user feedback
@@ -1153,6 +1264,12 @@ class MainWindow(QMainWindow):
         self._thread.gaze_status.connect(self._on_gaze)
         self._thread.log_message.connect(self._on_log)
         self._thread.start()
+
+        # ── Keyboard shortcuts ───────────────────────────────────────────
+        QShortcut(QKeySequence("Ctrl+P"), self).activated.connect(
+            self._offer_breathing_break)
+        QShortcut(QKeySequence("Ctrl+B"), self).activated.connect(
+            self._trigger_boredom)
 
         # ── Predictive stress model ─────────────────────────────────────
         self._predictor = StressPredictor(
@@ -1306,6 +1423,16 @@ class MainWindow(QMainWindow):
     def _on_warm_tint_hidden(self):
         pass  # future hook
 
+    def _trigger_boredom(self):
+        """Cmd+B: manually fire the boredom glow and show the lock-in widget."""
+        self._glow.show_glow(QColor(220, 50, 50), duration_ms=BOREDOM_GLOW_MS)
+        self._glow_source = "boredom"
+        self._lock_in.set_nudge(True)
+
+    def _on_overlay_toggled(self, checked: bool):
+        self._thread.show_overlay = checked
+        self._overlay_btn.setText("Overlay: ON" if checked else "Overlay: OFF")
+
     def _toggle_warm_tint(self):
         if self._warm_tint.active:
             self._warm_tint.hide_tint()
@@ -1332,7 +1459,9 @@ class MainWindow(QMainWindow):
 
     def _on_sound_toggle(self, checked):
         if not checked:
+            self._fade_vol_timer.stop()
             if self._player is not None:
+                self._player.setVolume(0)
                 self._player.stop()
         else:
             # If stress is already active and held, start sound immediately
@@ -1348,14 +1477,30 @@ class MainWindow(QMainWindow):
             self._play_stress_sound()
 
     def _play_stress_sound(self):
-        """Play the selected stress sound if the dashboard toggle is ON."""
+        """Start playing the stress sound looped, faded in from silence."""
         if self._player is None or not self._dashboard.sound_enabled:
             return
         sound_file = pathlib.Path(__file__).parent / self._dashboard.selected_sound
         if not sound_file.exists():
             return
-        self._player.setMedia(QMediaContent(QUrl.fromLocalFile(str(sound_file))))
+        self._fade_vol_timer.stop()
+        self._player.setVolume(0)
+        self._playlist.clear()
+        self._playlist.addMedia(QMediaContent(QUrl.fromLocalFile(str(sound_file))))
         self._player.play()
+        self._fade_vol_timer.start()
+
+    def _fade_vol_tick(self):
+        """Ramp volume up by ~2 per tick (0 → target over ~2.8 s at 80 ms intervals)."""
+        if self._player is None:
+            self._fade_vol_timer.stop()
+            return
+        current = self._player.volume()
+        if current >= self._sound_target_vol:
+            self._player.setVolume(self._sound_target_vol)
+            self._fade_vol_timer.stop()
+        else:
+            self._player.setVolume(current + 2)
 
     def _offer_breathing_break(self):
         dlg = StressBreakDialog(self)

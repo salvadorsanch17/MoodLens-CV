@@ -1,7 +1,7 @@
 from collections import defaultdict
 from datetime import datetime
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QFont
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
@@ -10,18 +10,18 @@ from PyQt5.QtWidgets import (
 
 # ── design tokens (from The Sentient Interface) ──────────────────────────────
 _C = {
-    "bg":       "#121416",
-    "surface":  "#1a1c1e",
-    "surface2": "#1e2022",
-    "surface3": "#282a2c",
-    "surfaceH": "#333537",
-    "primary":  "#71d7cd",
-    "primaryC": "#008178",
-    "secondary":"#94ccff",
-    "tertiary": "#ffb59e",
-    "onSurf":   "#e2e2e5",
-    "onSurfV":  "#bdc9c8",
-    "outline":  "#3e4949",
+    "bg":       "#060B1C",   # near-black navy
+    "surface":  "#0A1228",   # dark navy surface
+    "surface2": "#0D1632",   # slightly lighter
+    "surface3": "#12203E",   # medium navy
+    "surfaceH": "#1C2A52",   # highlight surface
+    "primary":  "#82C8E5",   # sky blue — bright accent on dark
+    "primaryC": "#0047AB",   # cobalt blue — interactive / filled states
+    "secondary":"#82C8E5",   # sky blue secondary
+    "tertiary": "#6D8196",   # slate blue-grey — muted accent / high-stress bars
+    "onSurf":   "#D4E8F8",   # light cool-white text
+    "onSurfV":  "#6D8196",   # muted slate text
+    "outline":  "#1C2A52",   # navy border
 }
 
 _EMOTION_STATES = {
@@ -33,6 +33,73 @@ _EMOTION_STATES = {
     "disgust":  ("Aversion",  "Aversion response detected. Consider adjusting your current activity."),
     "neutral":  ("Focused",   "Baseline emotional state. Conditions are optimal for deep focus work."),
 }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Toggle switch widget
+# ═══════════════════════════════════════════════════════════════════════════
+
+class ToggleSwitch(QWidget):
+    """Animated pill-shaped toggle switch."""
+    toggled = pyqtSignal(bool)
+
+    _W, _H = 40, 22
+
+    def __init__(self, checked=False, parent=None):
+        super().__init__(parent)
+        self._checked = checked
+        self._offset = 1.0 if checked else 0.0
+        self.setFixedSize(self._W, self._H)
+        self.setCursor(Qt.PointingHandCursor)
+        self._timer = QTimer(self)
+        self._timer.setInterval(12)
+        self._timer.timeout.connect(self._tick)
+
+    def isChecked(self):
+        return self._checked
+
+    def setChecked(self, val):
+        if val == self._checked:
+            return
+        self._checked = val
+        self._timer.start()
+        self.toggled.emit(self._checked)
+
+    def mousePressEvent(self, _):
+        self.setChecked(not self._checked)
+
+    def _tick(self):
+        target = 1.0 if self._checked else 0.0
+        diff = target - self._offset
+        if abs(diff) < 0.04:
+            self._offset = target
+            self._timer.stop()
+        else:
+            self._offset += diff * 0.3
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+
+        # Track — interpolate from surfaceH (off) to primaryC (on)
+        off_c, on_c = QColor(_C["surfaceH"]), QColor(_C["primaryC"])
+        t = self._offset
+        track = QColor(
+            int(off_c.red()   + (on_c.red()   - off_c.red())   * t),
+            int(off_c.green() + (on_c.green() - off_c.green()) * t),
+            int(off_c.blue()  + (on_c.blue()  - off_c.blue())  * t),
+        )
+        p.setBrush(track)
+        p.drawRoundedRect(0, 0, self._W, self._H, self._H // 2, self._H // 2)
+
+        # Knob
+        d = self._H - 4
+        knob_x = int(2 + self._offset * (self._W - d - 4))
+        p.setBrush(QColor(255, 255, 255))
+        p.drawEllipse(knob_x, 2, d, d)
+        p.end()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -79,7 +146,7 @@ class BarChartWidget(QWidget):
 
         # Labels
         p.setPen(QColor(_C["onSurfV"]))
-        f = QFont("Inter", 8)
+        f = QFont("Cabin", 8)
         f.setLetterSpacing(QFont.AbsoluteSpacing, 1.5)
         p.setFont(f)
         for i, lbl in enumerate(self._labels):
@@ -161,7 +228,7 @@ class DashboardWidget(QWidget):
         return w
 
     @staticmethod
-    def _lbl(text, color=None, size=14, bold=False, family="Inter", upper=False):
+    def _lbl(text, color=None, size=14, bold=False, family="Cabin", upper=False):
         color = color or _C["onSurf"]
         l = QLabel(text)
         weight = "700" if bold else "400"
@@ -190,7 +257,7 @@ class DashboardWidget(QWidget):
 
         msg = QLabel("Stress was detected — were you actually stressed?")
         msg.setStyleSheet(
-            "color: #e8c88a; font-size: 12px; font-family: 'Inter';"
+            "color: #e8c88a; font-size: 12px; font-family: 'Cabin';"
             " background: transparent;")
         row.addWidget(msg, stretch=1)
 
@@ -200,7 +267,7 @@ class DashboardWidget(QWidget):
             "QPushButton { background: #0e2a1f; color: #4caf50;"
             " border: 1px solid #1e6b4c; border-radius: 6px;"
             " padding: 4px 14px; font-size: 11px; font-weight: 600;"
-            " font-family: 'Inter'; }"
+            " font-family: 'Cabin'; }"
             "QPushButton:hover { background: #12402e; }")
         yes_btn.clicked.connect(self.true_positive_clicked)
         yes_btn.clicked.connect(banner.hide)
@@ -212,7 +279,7 @@ class DashboardWidget(QWidget):
             "QPushButton { background: #3d2a0a; color: #f0a030;"
             " border: 1px solid #6b4c1e; border-radius: 6px;"
             " padding: 4px 14px; font-size: 11px; font-weight: 600;"
-            " font-family: 'Inter'; }"
+            " font-family: 'Cabin'; }"
             "QPushButton:hover { background: #5a3e12; }")
         not_stressed_btn.clicked.connect(self.false_positive_clicked)
         not_stressed_btn.clicked.connect(banner.hide)
@@ -253,28 +320,13 @@ class DashboardWidget(QWidget):
         snd_icon.setStyleSheet("background: transparent;")
         row.addWidget(snd_icon)
 
-        self._sound_btn = QPushButton("Sound: OFF")
-        self._sound_btn.setCheckable(True)
-        self._sound_btn.setChecked(False)
-        self._sound_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {_C['surface3']};
-                color: {_C['onSurfV']};
-                border: 1px solid {_C['outline']};
-                border-radius: 10px;
-                padding: 4px 14px;
-                font-size: 11px;
-                font-weight: 600;
-                font-family: 'Inter';
-            }}
-            QPushButton:checked {{
-                background: {_C['primaryC']};
-                color: #ffffff;
-                border: 1px solid {_C['primary']};
-            }}
-        """)
-        self._sound_btn.toggled.connect(self._on_sound_toggled)
+        row.addWidget(self._lbl("Sound", _C["onSurfV"], 11))
+        row.addSpacing(4)
+
+        self._sound_btn = ToggleSwitch(checked=False)
         row.addWidget(self._sound_btn)
+
+        row.addSpacing(8)
 
         self._sound_selector = QComboBox()
         self._sound_selector.addItem("Rain", "stress_alert.mp3")
@@ -285,12 +337,18 @@ class DashboardWidget(QWidget):
                 color: {_C['onSurfV']};
                 border: 1px solid {_C['outline']};
                 border-radius: 10px;
-                padding: 4px 10px;
+                padding: 4px 10px 4px 12px;
                 font-size: 11px;
                 font-weight: 600;
-                font-family: 'Inter';
+                font-family: 'Cabin';
             }}
-            QComboBox::drop-down {{ border: none; width: 18px; }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 22px;
+                border-top-right-radius: 10px;
+                border-bottom-right-radius: 10px;
+            }}
             QComboBox QAbstractItemView {{
                 background: {_C['surface3']};
                 color: {_C['onSurf']};
@@ -520,9 +578,6 @@ class DashboardWidget(QWidget):
         self._lay.addWidget(card)
 
     # ── sound toggle ─────────────────────────────────────────────────────
-
-    def _on_sound_toggled(self, checked):
-        self._sound_btn.setText("Sound: ON" if checked else "Sound: OFF")
 
     @property
     def sound_enabled(self):
